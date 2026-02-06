@@ -79,29 +79,47 @@ def _is_user_field(name: str) -> bool:
     return name not in _INTERNAL_FIELDS and not name.startswith("_")
 
 
-def _extract_query_fields(query: dict, target: set[str]) -> None:
-    """Recursively extract field names from a query clause."""
+def _extract_query_fields(query: dict, refs: FieldRefs, context: str = "queried") -> None:
+    """
+    Recursively extract field names from a query clause.
+
+    Args:
+        query: The query dict to walk.
+        refs: FieldRefs to populate.
+        context: "queried" or "filtered" — determines which set fields go into.
+    """
     if not isinstance(query, dict):
         return
 
     for key, value in query.items():
         # Bool compound query — recurse into each clause list
         if key == "bool" and isinstance(value, dict):
-            for clause_type in ("must", "should", "must_not", "filter"):
+            # must/should/must_not preserve current context
+            for clause_type in ("must", "should", "must_not"):
                 clauses = value.get(clause_type)
                 if isinstance(clauses, list):
                     for clause in clauses:
-                        _extract_query_fields(clause, target)
+                        _extract_query_fields(clause, refs, context)
                 elif isinstance(clauses, dict):
-                    _extract_query_fields(clauses, target)
+                    _extract_query_fields(clauses, refs, context)
+            # filter clause → fields go to "filtered" context
+            filter_clauses = value.get("filter")
+            if isinstance(filter_clauses, list):
+                for clause in filter_clauses:
+                    _extract_query_fields(clause, refs, "filtered")
+            elif isinstance(filter_clauses, dict):
+                _extract_query_fields(filter_clauses, refs, "filtered")
             continue
 
         # Nested query
         if key == "nested" and isinstance(value, dict):
             nested_query = value.get("query")
             if nested_query:
-                _extract_query_fields(nested_query, target)
+                _extract_query_fields(nested_query, refs, context)
             continue
+
+        # Resolve target set based on context
+        target = refs.filtered if context == "filtered" else refs.queried
 
         # Leaf query types — the key under them is the field name
         if key in _LEAF_QUERY_TYPES and isinstance(value, dict):
@@ -189,12 +207,12 @@ def extract_fields_from_search(body: dict) -> FieldRefs:
 
     query = body.get("query")
     if query:
-        _extract_query_fields(query, refs.queried)
+        _extract_query_fields(query, refs, context="queried")
 
-    # Post-filter goes to filtered
+    # Post-filter is always filter context
     post_filter = body.get("post_filter")
     if post_filter:
-        _extract_query_fields(post_filter, refs.filtered)
+        _extract_query_fields(post_filter, refs, context="filtered")
 
     for agg_key in ("aggs", "aggregations"):
         aggs = body.get(agg_key)
@@ -221,21 +239,21 @@ def extract_fields_from_document(body: dict) -> FieldRefs:
     return refs
 
 
-def parse_path(path: str) -> tuple[str | None, str | None]:
+def parse_path(path: str) -> tuple[list[str] | None, str | None]:
     """
-    Parse an ES URL path to extract index name and operation.
+    Parse an ES URL path to extract index name(s) and operation.
 
     Returns:
-        (index_name, operation) — either can be None.
+        (indices, operation) — either can be None.
+        indices is a list to support comma-separated multi-index paths.
 
     Examples:
-        /products/_search     -> ("products", "search")
-        /products/_doc/123    -> ("products", "doc")
-        /products/_count      -> ("products", "count")
-        /products/_bulk       -> ("products", "bulk")
-        /_bulk                -> (None, "bulk")
-        /_cluster/health      -> (None, "cluster")
-        /products             -> ("products", None)
+        /products/_search          -> (["products"], "search")
+        /products,orders/_search   -> (["products", "orders"], "search")
+        /products/_doc/123         -> (["products"], "doc")
+        /_bulk                     -> (None, "bulk")
+        /_cluster/health           -> (None, "cluster")
+        /products                  -> (["products"], None)
     """
     # Strip leading slash
     path = path.lstrip("/")
@@ -249,25 +267,30 @@ def parse_path(path: str) -> tuple[str | None, str | None]:
         operation = parts[0].lstrip("_")
         return None, operation
 
-    index_name = parts[0]
+    # Handle comma-separated multi-index: "products,orders"
+    raw_index = parts[0]
+    indices = [idx.strip() for idx in raw_index.split(",") if idx.strip()]
+    if not indices:
+        return None, None
 
     if len(parts) < 2:
-        return index_name, None
+        return indices, None
 
     operation = parts[1].lstrip("_")
-    return index_name, operation
+    return indices, operation
 
 
 def extract_from_request(
     path: str, method: str, body: bytes
-) -> tuple[str | None, str, FieldRefs]:
+) -> tuple[list[str] | None, str, FieldRefs]:
     """
-    Top-level extraction: given a raw request, return index, operation, and field refs.
+    Top-level extraction: given a raw request, return indices, operation, and field refs.
 
     Returns:
-        (index_name, operation, FieldRefs)
+        (indices, operation, FieldRefs)
+        indices is a list of index names (supports multi-index paths like /a,b/_search).
     """
-    index_name, operation = parse_path(path)
+    indices, operation = parse_path(path)
     operation = operation or "other"
     refs = FieldRefs()
 
@@ -289,9 +312,10 @@ def extract_from_request(
             logger.debug("Could not parse body as JSON for %s", path)
 
     elif operation == "bulk":
-        refs = _extract_from_bulk(body, index_name)
+        default_index = indices[0] if indices else None
+        refs = _extract_from_bulk(body, default_index)
 
-    return index_name, operation, refs
+    return indices, operation, refs
 
 
 def _extract_from_bulk(body: bytes, default_index: str | None) -> FieldRefs:

@@ -7,6 +7,8 @@ Emission failures are logged but never affect request handling.
 
 from __future__ import annotations
 import asyncio
+import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -41,6 +43,8 @@ USAGE_INDEX_MAPPING = {
                     "written":    {"type": "keyword"},
                 }
             },
+            "language":           {"type": "keyword"},
+            "query_fingerprint": {"type": "keyword"},
             "response_time_ms":  {"type": "float"},
             "response_status":   {"type": "integer"},
             "client_id":         {"type": "keyword"},
@@ -74,6 +78,18 @@ async def ensure_usage_index() -> None:
         logger.warning("Could not ensure usage index exists: %s", exc)
 
 
+def _compute_fingerprint(body: bytes) -> str | None:
+    """SHA-256 of canonicalized JSON body, or None if not parseable."""
+    if not body:
+        return None
+    try:
+        parsed = json.loads(body)
+        canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
 def build_event(
     index_name: str | None,
     operation: str,
@@ -83,6 +99,8 @@ def build_event(
     response_status: int,
     elapsed_ms: float,
     client_id: str | None = None,
+    language: str = "dsl",
+    body: bytes = b"",
 ) -> dict:
     """Build a usage event document."""
     return {
@@ -93,6 +111,8 @@ def build_event(
         "http_method": method,
         "path": path,
         "fields": field_refs.to_dict(),
+        "language": language,
+        "query_fingerprint": _compute_fingerprint(body),
         "response_time_ms": elapsed_ms,
         "response_status": response_status,
         "client_id": client_id,

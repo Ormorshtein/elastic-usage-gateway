@@ -62,6 +62,26 @@ async def heat(hours: float = 24.0):
     return JSONResponse(content=report)
 
 
+@app.get("/_gateway/sample-events")
+async def sample_events(count: int = 20):
+    """Return recent usage events for debugging."""
+    async with httpx.AsyncClient(base_url=ES_HOST, timeout=10.0) as client:
+        resp = await client.post(
+            f"/{USAGE_INDEX}/_search",
+            json={
+                "size": min(count, 100),
+                "sort": [{"timestamp": {"order": "desc"}}],
+            },
+        )
+        if resp.status_code == 200:
+            hits = resp.json().get("hits", {}).get("hits", [])
+            return {"count": len(hits), "events": [h["_source"] for h in hits]}
+        return JSONResponse(
+            content={"error": resp.text[:300]},
+            status_code=resp.status_code,
+        )
+
+
 @app.get("/_gateway/ui")
 async def ui():
     """Serve the control panel UI."""
@@ -124,20 +144,24 @@ async def generate(req: GenerateRequest):
 
                 # Extract fields and emit usage event — same as proxy flow
                 try:
-                    index_name, operation, field_refs = extract_from_request(
+                    indices, operation, field_refs = extract_from_request(
                         path=path, method=method, body=body_bytes,
                     )
-                    event = build_event(
-                        index_name=index_name,
-                        operation=operation,
-                        field_refs=field_refs,
-                        method=method,
-                        path=path,
-                        response_status=resp.status_code,
-                        elapsed_ms=resp.elapsed.total_seconds() * 1000 if hasattr(resp, 'elapsed') else 0,
-                        client_id="control-panel",
-                    )
-                    await emit_event(event)
+                    index_list = indices if indices else [None]
+                    elapsed_ms = resp.elapsed.total_seconds() * 1000 if hasattr(resp, 'elapsed') else 0
+                    for idx in index_list:
+                        event = build_event(
+                            index_name=idx,
+                            operation=operation,
+                            field_refs=field_refs,
+                            method=method,
+                            path=path,
+                            response_status=resp.status_code,
+                            elapsed_ms=elapsed_ms,
+                            client_id="control-panel",
+                            body=body_bytes,
+                        )
+                        await emit_event(event)
                 except Exception:
                     logger.debug("Event emission failed for generated query", exc_info=True)
 
@@ -191,7 +215,7 @@ async def proxy_catchall(request: Request):
 
     # Step 2: extract (safe — never raises)
     try:
-        index_name, operation, field_refs = extract_from_request(
+        indices, operation, field_refs = extract_from_request(
             path=metadata["path"],
             method=metadata["method"],
             body=metadata["body"],
@@ -201,28 +225,29 @@ async def proxy_catchall(request: Request):
         return response
 
     # Skip emitting events for our own usage index to avoid infinite recursion
-    if index_name and index_name.startswith(".usage"):
+    if indices and any(idx.startswith(".usage") for idx in indices):
         return response
 
     # Skip internal ES endpoints that aren't user queries
     if operation in ("cluster", "cat", "nodes", "tasks", "gateway"):
         return response
 
-    # Step 3: build event
+    # Step 3+4: build and emit event(s) — one per index for multi-index queries
     client_id = request.headers.get("x-client-id")
-    event = build_event(
-        index_name=index_name,
-        operation=operation,
-        field_refs=field_refs,
-        method=metadata["method"],
-        path=metadata["path"],
-        response_status=metadata["response_status"],
-        elapsed_ms=metadata["elapsed_ms"],
-        client_id=client_id,
-    )
-
-    # Step 4: emit in background
-    emit_event_background(event)
+    index_list = indices if indices else [None]
+    for idx in index_list:
+        event = build_event(
+            index_name=idx,
+            operation=operation,
+            field_refs=field_refs,
+            method=metadata["method"],
+            path=metadata["path"],
+            response_status=metadata["response_status"],
+            elapsed_ms=metadata["elapsed_ms"],
+            client_id=client_id,
+            body=metadata["body"],
+        )
+        emit_event_background(event)
 
     # Step 5: return response
     return response
