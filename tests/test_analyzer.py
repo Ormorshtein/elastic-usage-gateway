@@ -1,6 +1,6 @@
-"""Tests for gateway.analyzer — tier classification logic."""
+"""Tests for gateway.analyzer — tier classification and recommendations."""
 
-from gateway.analyzer import _index_tier, _field_tier
+from gateway.analyzer import _index_tier, _field_tier, _recommend_index, _recommend_field
 
 
 class TestIndexTier:
@@ -55,3 +55,55 @@ class TestFieldTier:
         assert _field_tier(0.05) == "warm"
         assert _field_tier(0.01) == "cold"
         assert _field_tier(0.0099) == "unused"
+
+
+class TestRecommendIndex:
+    def test_frozen_recommends_freeze(self):
+        recs = _recommend_index("frozen", 0.5)
+        assert len(recs) == 1
+        assert "freezing" in recs[0].lower() or "reducing replicas" in recs[0].lower()
+
+    def test_cold_recommends_cold_tier(self):
+        recs = _recommend_index("cold", 5)
+        assert len(recs) == 1
+        assert "cold" in recs[0].lower()
+
+    def test_hot_recommends_replicas(self):
+        recs = _recommend_index("hot", 150)
+        assert len(recs) == 1
+        assert "replicas" in recs[0].lower()
+
+    def test_warm_no_recommendation(self):
+        recs = _recommend_index("warm", 50)
+        assert recs == []
+
+
+class TestRecommendField:
+    def test_unused_field(self):
+        cats = {"queried": 0, "filtered": 0, "aggregated": 0, "sorted": 0, "sourced": 0, "written": 0}
+        rec = _recommend_field("internal_sku", "unused", cats)
+        assert rec is not None
+        assert "index: false" in rec
+
+    def test_cold_field(self):
+        cats = {"queried": 1, "filtered": 0, "aggregated": 0, "sorted": 0, "sourced": 0, "written": 0}
+        rec = _recommend_field("rare_field", "cold", cats)
+        assert rec is not None
+        assert "doc_values" in rec
+
+    def test_only_sourced_field(self):
+        cats = {"queried": 0, "filtered": 0, "aggregated": 0, "sorted": 0, "sourced": 10, "written": 0}
+        rec = _recommend_field("display_field", "warm", cats)
+        assert rec is not None
+        assert "index: false" in rec
+
+    def test_aggregated_field(self):
+        cats = {"queried": 0, "filtered": 0, "aggregated": 5, "sorted": 0, "sourced": 0, "written": 0}
+        rec = _recommend_field("brand", "hot", cats)
+        assert rec is not None
+        assert "doc_values" in rec
+
+    def test_queried_hot_field_no_rec(self):
+        cats = {"queried": 50, "filtered": 0, "aggregated": 0, "sorted": 0, "sourced": 0, "written": 0}
+        rec = _recommend_field("title", "hot", cats)
+        assert rec is None
