@@ -9,10 +9,12 @@ Routes:
   /_gateway/heat           — heat analysis endpoint (GET), ?index_group= filter
   /_gateway/groups         — index groups with concrete indices (GET)
   /_gateway/sample-events  — recent usage events (GET), ?index_group= filter
+  /_gateway/config         — query body storage config (GET/PATCH)
   /_gateway/health         — gateway health check (GET)
   /{path:path}             — everything else proxied to Elasticsearch
 """
 
+import asyncio
 import json
 import time
 import logging
@@ -26,7 +28,7 @@ from pydantic import BaseModel
 from config import GATEWAY_HOST, GATEWAY_PORT, ES_HOST, USAGE_INDEX
 from gateway.proxy import proxy_request
 from gateway.extractor import extract_from_request
-from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index
+from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, get_query_body_config, set_query_body_config
 from gateway.analyzer import compute_heat
 from gateway.ui import HTML_PAGE
 from gateway import metadata as metadata_mod
@@ -45,15 +47,13 @@ def _resolve_concrete_indices(
     operation: str,
     path_indices: list[str] | None,
 ) -> list[str] | None:
-    """Resolve concrete index names for a request.
+    """Resolve concrete index names from ES response hits.
 
-    Strategy:
-    1. For search operations, parse ES response hits to get _index values.
-    2. If no hits (e.g. aggregation-only queries), expand alias → concrete
-       indices via the metadata cache.
-    3. Returns None if neither approach yields results.
+    For search operations with hits, extracts the actual _index from each hit
+    so we know which concrete indices were touched. For aggregation-only
+    queries (size=0, no hits), returns None — the caller uses the path index
+    as-is and the index_group field handles grouping.
     """
-    # Try to extract from search response hits
     if operation == "search":
         try:
             data = json.loads(response_body)
@@ -64,18 +64,6 @@ def _resolve_concrete_indices(
                     return indices
         except Exception:
             pass
-
-    # Fallback: expand aliases via metadata cache
-    if path_indices:
-        groups = metadata_mod.get_groups()
-        expanded = []
-        for idx in path_indices:
-            if idx in groups and len(groups[idx]) > 1:
-                expanded.extend(groups[idx])
-            else:
-                expanded.append(idx)
-        if expanded != path_indices:
-            return expanded
 
     return None
 
@@ -99,6 +87,24 @@ app = FastAPI(title="ES Usage Gateway", lifespan=lifespan)
 @app.get("/_gateway/health")
 async def health():
     return {"status": "ok", "service": "es-usage-gateway"}
+
+
+@app.get("/_gateway/config")
+async def get_config():
+    """Return current gateway runtime configuration."""
+    return {"query_body": get_query_body_config()}
+
+
+@app.patch("/_gateway/config")
+async def update_config(request: Request):
+    """Update gateway runtime configuration (e.g. query body sampling)."""
+    body = await request.json()
+    qb = body.get("query_body", {})
+    result = set_query_body_config(
+        enabled=qb.get("enabled"),
+        sample_rate=qb.get("sample_rate"),
+    )
+    return {"query_body": result}
 
 
 @app.get("/_gateway/heat")
@@ -153,6 +159,7 @@ async def get_scenarios():
             "index": scenario["index"],
             "weights": scenario["weights"],
             "labels": scenario["labels"],
+            "time_range_queries": sorted(scenario.get("time_range_queries", set())),
         }
     return result
 
@@ -161,6 +168,7 @@ class GenerateRequest(BaseModel):
     count: int = 200
     scenario: str | None = None
     weights: dict[str, int] | None = None
+    lookback: str | None = None
 
 
 @app.post("/_gateway/generate")
@@ -197,66 +205,77 @@ async def generate(req: GenerateRequest):
         names = list(query_funcs.keys())
         w = list(default_weights.values())
 
-    async with httpx.AsyncClient(base_url=ES_HOST, timeout=30.0) as client:
-        sent = 0
-        ok = 0
-        errors = 0
-        breakdown: dict[str, int] = {}
-        start = time.monotonic()
+    # Pre-generate all queries (instant)
+    tasks_list = []
+    breakdown: dict[str, int] = {}
+    for _ in range(req.count):
+        idx = _random.choices(range(len(funcs)), weights=w, k=1)[0]
+        query_name = names[idx]
+        method, path, body = funcs[idx](lookback=req.lookback)
+        breakdown[query_name] = breakdown.get(query_name, 0) + 1
+        tasks_list.append((method, path, body))
 
-        for _ in range(req.count):
-            idx = _random.choices(range(len(funcs)), weights=w, k=1)[0]
-            query_name = names[idx]
-            method, path, body = funcs[idx]()
-            breakdown[query_name] = breakdown.get(query_name, 0) + 1
-            body_bytes = body.encode() if body else b""
+    # Send concurrently with bounded parallelism
+    sem = asyncio.Semaphore(20)
+    results = []  # list of (status_code | None)
 
+    async def _run_one(client, method, path, body):
+        body_bytes = body.encode() if body else b""
+        async with sem:
             try:
                 resp = await client.request(
-                    method=method,
-                    url=path,
-                    content=body_bytes,
+                    method=method, url=path, content=body_bytes,
                     headers={"Content-Type": "application/json"},
                 )
-                sent += 1
-                if 200 <= resp.status_code < 300:
-                    ok += 1
-                else:
-                    errors += 1
-
-                # Extract fields and emit usage event — same as proxy flow
-                try:
-                    indices, operation, field_refs = extract_from_request(
-                        path=path, method=method, body=body_bytes,
-                    )
-                    concrete = _resolve_concrete_indices(resp.content, operation, indices)
-                    index_list = concrete or indices or [None]
-                    elapsed_ms = resp.elapsed.total_seconds() * 1000 if hasattr(resp, 'elapsed') else 0
-                    for idx_name in index_list:
-                        group = metadata_mod.resolve_group(idx_name) if idx_name else None
-                        event = build_event(
-                            index_name=idx_name,
-                            operation=operation,
-                            field_refs=field_refs,
-                            method=method,
-                            path=path,
-                            response_status=resp.status_code,
-                            elapsed_ms=elapsed_ms,
-                            client_id="control-panel",
-                            body=body_bytes,
-                            index_group=group,
-                        )
-                        await emit_event(event)
-                except Exception:
-                    logger.debug("Event emission failed for generated query", exc_info=True)
-
             except httpx.RequestError:
-                sent += 1
-                errors += 1
+                return None, method, path, body_bytes
+            return resp, method, path, body_bytes
 
+    async with httpx.AsyncClient(base_url=ES_HOST, timeout=30.0) as client:
+        start = time.monotonic()
+        raw = await asyncio.gather(*[
+            _run_one(client, m, p, b) for m, p, b in tasks_list
+        ])
         elapsed = round(time.monotonic() - start, 2)
 
-    return {"sent": sent, "ok": ok, "errors": errors, "elapsed_seconds": elapsed, "breakdown": breakdown}
+    sent = 0
+    ok = 0
+    errors = 0
+    for resp, method, path, body_bytes in raw:
+        sent += 1
+        if resp is None:
+            errors += 1
+            continue
+        if 200 <= resp.status_code < 300:
+            ok += 1
+        else:
+            errors += 1
+        try:
+            indices, operation, field_refs = extract_from_request(
+                path=path, method=method, body=body_bytes,
+            )
+            concrete = _resolve_concrete_indices(resp.content, operation, indices)
+            index_list = concrete or indices or [None]
+            elapsed_ms = resp.elapsed.total_seconds() * 1000 if hasattr(resp, 'elapsed') else 0
+            for idx_name in index_list:
+                group = metadata_mod.resolve_group(idx_name) if idx_name else None
+                event = build_event(
+                    index_name=idx_name,
+                    operation=operation,
+                    field_refs=field_refs,
+                    method=method,
+                    path=path,
+                    response_status=resp.status_code,
+                    elapsed_ms=elapsed_ms,
+                    client_id="control-panel",
+                    body=body_bytes,
+                    index_group=group,
+                )
+                emit_event_background(event)
+        except Exception:
+            logger.debug("Event emission failed for generated query", exc_info=True)
+
+    return {"sent": sent, "ok": ok, "errors": errors, "elapsed_seconds": elapsed, "breakdown": breakdown, "lookback": req.lookback}
 
 
 @app.delete("/_gateway/events")
@@ -315,6 +334,10 @@ async def proxy_catchall(request: Request):
 
     # Skip internal ES endpoints that aren't user queries
     if operation in ("cluster", "cat", "nodes", "tasks", "gateway"):
+        return response
+
+    # Skip browser artifact requests (favicon.ico, etc.)
+    if indices and any(idx in ("favicon.ico",) for idx in indices):
         return response
 
     # Step 3+4: build and emit event(s) — one per index for multi-index queries

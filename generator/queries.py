@@ -32,7 +32,7 @@ PRODUCT_BRANDS = [
 ]
 
 
-def search_by_title():
+def search_by_title(**kwargs):
     """Match query on title, with _source filtering."""
     term = random.choice(SEARCH_TERMS)
     body = {
@@ -43,7 +43,7 @@ def search_by_title():
     return "POST", "/products/_search", json.dumps(body)
 
 
-def filter_by_category_sort_by_price():
+def filter_by_category_sort_by_price(**kwargs):
     """Bool filter on category, sorted by price."""
     cat = random.choice(PRODUCT_CATEGORIES)
     body = {
@@ -59,7 +59,7 @@ def filter_by_category_sort_by_price():
     return "POST", "/products/_search", json.dumps(body)
 
 
-def aggregate_by_brand():
+def aggregate_by_brand(**kwargs):
     """Terms aggregation on brand."""
     body = {
         "size": 0,
@@ -70,7 +70,7 @@ def aggregate_by_brand():
     return "POST", "/products/_search", json.dumps(body)
 
 
-def range_on_rating():
+def range_on_rating(**kwargs):
     """Range query on rating."""
     min_rating = round(random.uniform(3.0, 4.5), 1)
     body = {
@@ -80,7 +80,7 @@ def range_on_rating():
     return "POST", "/products/_search", json.dumps(body)
 
 
-def search_by_description():
+def search_by_description(**kwargs):
     """Match query on description."""
     term = random.choice(SEARCH_TERMS)
     body = {
@@ -90,13 +90,13 @@ def search_by_description():
     return "POST", "/products/_search", json.dumps(body)
 
 
-def products_get_by_id():
+def products_get_by_id(**kwargs):
     """GET a single document by ID."""
     doc_id = random.randint(1, 100)
     return "GET", f"/products/_doc/{doc_id}", None
 
 
-def products_match_all():
+def products_match_all(**kwargs):
     """match_all with no field references."""
     body = {"query": {"match_all": {}}, "size": 5}
     return "POST", "/products/_search", json.dumps(body)
@@ -111,16 +111,16 @@ LOG_SERVICES = ["api-gateway", "auth-service", "payment-service", "inventory-ser
 LOG_MESSAGES_SEARCH = ["timeout", "error", "failed", "slow", "retry", "connection", "authenticated"]
 
 
-def logs_filter_by_level():
+def logs_filter_by_level(lookback=None, **kwargs):
     """Bool filter on level + range on timestamp, sort by timestamp."""
     level = random.choice(["ERROR", "WARN", "INFO"])
-    hours = random.choice([1, 6, 12, 24, 48])
+    time_expr = f"now-{lookback}" if lookback else f"now-{random.choice([1, 6, 12, 24, 48])}h"
     body = {
         "query": {
             "bool": {
                 "filter": [
                     {"term": {"level": level}},
-                    {"range": {"timestamp": {"gte": f"now-{hours}h"}}},
+                    {"range": {"timestamp": {"gte": time_expr}}},
                 ]
             }
         },
@@ -130,7 +130,7 @@ def logs_filter_by_level():
     return "POST", "/logs/_search", json.dumps(body)
 
 
-def logs_search_message():
+def logs_search_message(**kwargs):
     """Match query on message text."""
     term = random.choice(LOG_MESSAGES_SEARCH)
     body = {
@@ -141,7 +141,7 @@ def logs_search_message():
     return "POST", "/logs/_search", json.dumps(body)
 
 
-def logs_agg_by_service():
+def logs_agg_by_service(**kwargs):
     """Terms agg on service with sub-agg avg on duration_ms."""
     body = {
         "size": 0,
@@ -157,12 +157,13 @@ def logs_agg_by_service():
     return "POST", "/logs/_search", json.dumps(body)
 
 
-def logs_agg_over_time():
+def logs_agg_over_time(lookback=None, **kwargs):
     """Date histogram on timestamp."""
     interval = random.choice(["1h", "30m", "15m"])
+    time_expr = f"now-{lookback}" if lookback else "now-24h"
     body = {
         "size": 0,
-        "query": {"range": {"timestamp": {"gte": "now-24h"}}},
+        "query": {"range": {"timestamp": {"gte": time_expr}}},
         "aggs": {
             "over_time": {
                 "date_histogram": {"field": "timestamp", "fixed_interval": interval},
@@ -172,7 +173,7 @@ def logs_agg_over_time():
     return "POST", "/logs/_search", json.dumps(body)
 
 
-def logs_filter_by_service_and_status():
+def logs_filter_by_service_and_status(**kwargs):
     """Bool filter on service + range on status_code."""
     service = random.choice(LOG_SERVICES)
     body = {
@@ -201,7 +202,7 @@ ORDER_COUNTRIES = ["US", "UK", "DE", "FR", "JP", "CA", "AU"]
 CUSTOMER_NAMES = ["Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry"]
 
 
-def orders_agg_revenue_by_category():
+def orders_agg_revenue_by_category(**kwargs):
     """Terms on category with sum on total_amount."""
     body = {
         "size": 0,
@@ -217,7 +218,7 @@ def orders_agg_revenue_by_category():
     return "POST", "/orders/_search", json.dumps(body)
 
 
-def orders_filter_by_status():
+def orders_filter_by_status(**kwargs):
     """Bool filter on status, sort by order_date."""
     status = random.choice(ORDER_STATUSES)
     body = {
@@ -233,7 +234,7 @@ def orders_filter_by_status():
     return "POST", "/orders/_search", json.dumps(body)
 
 
-def orders_agg_by_payment_method():
+def orders_agg_by_payment_method(**kwargs):
     """Terms aggregation on payment_method."""
     body = {
         "size": 0,
@@ -244,7 +245,7 @@ def orders_agg_by_payment_method():
     return "POST", "/orders/_search", json.dumps(body)
 
 
-def orders_search_customer():
+def orders_search_customer(**kwargs):
     """Match query on customer_name."""
     name = random.choice(CUSTOMER_NAMES)
     body = {
@@ -255,18 +256,18 @@ def orders_search_customer():
     return "POST", "/orders/_search", json.dumps(body)
 
 
-def orders_date_range():
+def orders_date_range(lookback=None, **kwargs):
     """Range query on order_date."""
-    days = random.choice([7, 14, 30, 60])
+    time_expr = f"now-{lookback}" if lookback else f"now-{random.choice([7, 14, 30, 60])}d"
     body = {
-        "query": {"range": {"order_date": {"gte": f"now-{days}d"}}},
+        "query": {"range": {"order_date": {"gte": time_expr}}},
         "sort": [{"order_date": {"order": "desc"}}],
         "size": 20,
     }
     return "POST", "/orders/_search", json.dumps(body)
 
 
-def orders_agg_by_country():
+def orders_agg_by_country(**kwargs):
     """Terms aggregation on shipping_country."""
     body = {
         "size": 0,
@@ -317,6 +318,7 @@ SCENARIOS = {
             "get_by_id": "Get by ID",
             "match_all": "Match all",
         },
+        "time_range_queries": set(),
     },
     "logs": {
         "label": "Application Logging",
@@ -342,6 +344,7 @@ SCENARIOS = {
             "logs_agg_over_time": "Histogram over time",
             "logs_filter_by_service_and_status": "Filter service + error status",
         },
+        "time_range_queries": {"logs_filter_by_level", "logs_agg_over_time"},
     },
     "orders": {
         "label": "Order Analytics",
@@ -370,6 +373,7 @@ SCENARIOS = {
             "orders_date_range": "Date range filter",
             "orders_agg_by_country": "Revenue by country",
         },
+        "time_range_queries": {"orders_date_range"},
     },
 }
 

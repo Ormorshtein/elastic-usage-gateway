@@ -32,16 +32,18 @@ class LookbackInfo:
     """Extracted time-range lookback from a query (e.g., now-24h → 86400s)."""
     seconds: float
     field: str
+    label: str  # human-readable, e.g. "24h", "7d"
 
 
-def _parse_lookback_seconds(value) -> float | None:
-    """Parse 'now-Xh' style values to seconds. Returns None if not parseable."""
+def _parse_lookback(value) -> tuple[float, str] | None:
+    """Parse 'now-Xh' style values. Returns (seconds, label) or None."""
     if not isinstance(value, str):
         return None
     m = _LOOKBACK_RE.match(value.strip())
     if not m:
         return None
-    return int(m.group(1)) * _TIME_UNITS[m.group(2)]
+    num, unit = m.group(1), m.group(2)
+    return int(num) * _TIME_UNITS[unit], f"{num}{unit}"
 
 
 # ES internal fields we never report as user fields
@@ -159,9 +161,10 @@ def _extract_query_fields(
                 # Extract lookback from range queries
                 if key == "range" and lookbacks is not None and isinstance(field_body, dict):
                     for bound_key in ("gte", "gt"):
-                        lb = _parse_lookback_seconds(field_body.get(bound_key))
-                        if lb is not None:
-                            lookbacks.append(LookbackInfo(seconds=lb, field=field_name))
+                        parsed = _parse_lookback(field_body.get(bound_key))
+                        if parsed is not None:
+                            secs, label = parsed
+                            lookbacks.append(LookbackInfo(seconds=secs, field=field_name, label=label))
                             break
             continue
 

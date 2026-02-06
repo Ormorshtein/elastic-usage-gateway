@@ -73,6 +73,12 @@ HTML_PAGE = """<!DOCTYPE html>
     <label for="count">Query count:</label>
     <input type="number" id="count" value="200" min="1" max="10000">
   </div>
+  <div class="count-row" style="margin-top: 8px;">
+    <label for="lookback">Lookback:</label>
+    <input type="text" id="lookback" placeholder="e.g. 6h, 30d, 15m" style="width:160px; padding:6px 10px; border-radius:6px; border:1px solid #3a3d47; background:#0f1117; color:#fff; font-size:15px;">
+    <span style="color:#666; font-size:12px;" id="lookback-hint">empty = random</span>
+  </div>
+  <div id="time-range-info" style="margin-top:8px; font-size:12px; color:#666;"></div>
 </div>
 
 <div class="card">
@@ -85,6 +91,21 @@ HTML_PAGE = """<!DOCTYPE html>
   </div>
   <div class="progress" id="progress"><div class="progress-bar" style="width:100%"></div></div>
   <div class="status" id="status"></div>
+</div>
+
+<div class="card">
+  <h2>Query Body Storage</h2>
+  <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+    <label style="font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="qb-enabled" onchange="updateQBConfig()" style="accent-color:#4f8ff7;">
+      Store query bodies
+    </label>
+    <label style="font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px;">
+      Sample rate:
+      <input type="range" id="qb-rate" min="0" max="100" value="100" style="width:120px; accent-color:#4f8ff7;" oninput="document.getElementById('qb-rate-val').textContent=this.value+'%'; updateQBConfig()">
+      <span id="qb-rate-val" style="font-size:14px; font-weight:600; color:#4f8ff7; width:40px;">100%</span>
+    </label>
+  </div>
 </div>
 
 <div class="card">
@@ -132,6 +153,18 @@ function switchScenario(key) {
     t.className = 'tab' + (t.dataset.scenario === key ? ' active' : '');
   });
   buildSliders();
+  updateTimeRangeInfo();
+}
+
+function updateTimeRangeInfo() {
+  const s = scenarios[activeScenario];
+  const el = document.getElementById('time-range-info');
+  if (!s || !s.time_range_queries || s.time_range_queries.length === 0) {
+    el.textContent = 'No time-range queries in this scenario';
+    return;
+  }
+  const names = s.time_range_queries.map(q => s.labels[q] || q).join(', ');
+  el.textContent = 'Lookback affects: ' + names;
 }
 
 function buildSliders() {
@@ -192,24 +225,34 @@ function setButtonsDisabled(disabled) {
   document.getElementById('btn-run-all').disabled = disabled;
 }
 
+function getLookback() {
+  const val = document.getElementById('lookback').value.trim();
+  return val || null;
+}
+
 async function runScenario(scenarioKey, count) {
   const key = scenarioKey || activeScenario;
   const cnt = count || parseInt(document.getElementById('count').value);
   const weights = scenarioKey ? scenarios[key].weights : getWeights();
+  const lookback = getLookback();
 
   setButtonsDisabled(true);
-  setStatus('Running ' + (scenarios[key]?.label || key) + '...', 'info');
+  const lbText = lookback ? ' (lookback: ' + lookback + ')' : '';
+  setStatus('Running ' + (scenarios[key]?.label || key) + lbText + '...', 'info');
   setProgress(true);
   try {
+    const payload = { count: cnt, scenario: key, weights: weights };
+    if (lookback) payload.lookback = lookback;
     const resp = await fetch('/_gateway/generate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ count: cnt, scenario: key, weights: weights })
+      body: JSON.stringify(payload)
     });
     const data = await resp.json();
     if (resp.ok) {
       const s = scenarios[key];
-      let msg = (s?.label || key) + ': sent ' + data.sent + ' queries in ' + data.elapsed_seconds + 's (' + data.ok + ' ok, ' + data.errors + ' errors)';
+      const lbInfo = data.lookback ? ' [lookback: ' + data.lookback + ']' : '';
+      let msg = (s?.label || key) + ': sent ' + data.sent + ' queries in ' + data.elapsed_seconds + 's (' + data.ok + ' ok, ' + data.errors + ' errors)' + lbInfo;
       if (data.breakdown) {
         const labels = s?.labels || {};
         const lines = Object.entries(data.breakdown)
@@ -237,15 +280,18 @@ async function runAllScenarios() {
   setButtonsDisabled(true);
   setProgress(true);
   const count = parseInt(document.getElementById('count').value);
+  const lookback = getLookback();
   const results = [];
 
   for (const key of Object.keys(scenarios)) {
     setStatus('Running ' + scenarios[key].label + '...', 'info');
     try {
+      const payload = { count: count, scenario: key, weights: scenarios[key].weights };
+      if (lookback) payload.lookback = lookback;
       const resp = await fetch('/_gateway/generate', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ count: count, scenario: key, weights: scenarios[key].weights })
+        body: JSON.stringify(payload)
       });
       const data = await resp.json();
       if (resp.ok) {
@@ -282,7 +328,36 @@ async function clearStats() {
   btn.disabled = false;
 }
 
+async function loadQBConfig() {
+  try {
+    const resp = await fetch('/_gateway/config');
+    const data = await resp.json();
+    const qb = data.query_body || {};
+    document.getElementById('qb-enabled').checked = qb.enabled !== false;
+    const pct = Math.round((qb.sample_rate || 0) * 100);
+    document.getElementById('qb-rate').value = pct;
+    document.getElementById('qb-rate-val').textContent = pct + '%';
+  } catch (e) {}
+}
+
+let _qbTimer = null;
+function updateQBConfig() {
+  clearTimeout(_qbTimer);
+  _qbTimer = setTimeout(async () => {
+    const enabled = document.getElementById('qb-enabled').checked;
+    const rate = parseInt(document.getElementById('qb-rate').value) / 100;
+    try {
+      await fetch('/_gateway/config', {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ query_body: { enabled, sample_rate: rate } })
+      });
+    } catch (e) {}
+  }, 300);
+}
+
 loadScenarios();
+loadQBConfig();
 </script>
 </body>
 </html>

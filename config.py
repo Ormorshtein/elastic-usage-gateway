@@ -27,3 +27,7 @@ INDEX_HEAT_COLD = float(os.getenv("INDEX_HEAT_COLD", "1"))
 FIELD_HEAT_HOT = float(os.getenv("FIELD_HEAT_HOT", "0.15"))
 FIELD_HEAT_WARM = float(os.getenv("FIELD_HEAT_WARM", "0.05"))
 FIELD_HEAT_COLD = float(os.getenv("FIELD_HEAT_COLD", "0.01"))
+
+# --- Query Body Storage ---
+QUERY_BODY_ENABLED = os.getenv("QUERY_BODY_ENABLED", "true").lower() in ("true", "1", "yes")
+QUERY_BODY_SAMPLE_RATE = float(os.getenv("QUERY_BODY_SAMPLE_RATE", "1.0"))

@@ -10,14 +10,34 @@ import asyncio
 import hashlib
 import json
 import logging
+import random as _random
 from datetime import datetime, timezone
 
 import httpx
 
-from config import ES_HOST, USAGE_INDEX, CLUSTER_ID
+from config import ES_HOST, USAGE_INDEX, CLUSTER_ID, QUERY_BODY_ENABLED, QUERY_BODY_SAMPLE_RATE
 from gateway.extractor import FieldRefs
 
 logger = logging.getLogger(__name__)
+
+# Runtime-configurable query body storage
+_query_body_enabled: bool = QUERY_BODY_ENABLED
+_query_body_sample_rate: float = QUERY_BODY_SAMPLE_RATE
+
+
+def get_query_body_config() -> dict:
+    """Return current query body storage configuration."""
+    return {"enabled": _query_body_enabled, "sample_rate": _query_body_sample_rate}
+
+
+def set_query_body_config(enabled: bool | None = None, sample_rate: float | None = None) -> dict:
+    """Update query body storage configuration at runtime."""
+    global _query_body_enabled, _query_body_sample_rate
+    if enabled is not None:
+        _query_body_enabled = enabled
+    if sample_rate is not None:
+        _query_body_sample_rate = max(0.0, min(1.0, sample_rate))
+    return get_query_body_config()
 
 # Dedicated client for writing usage events — separate from the proxy client
 # to avoid contention.
@@ -51,6 +71,8 @@ USAGE_INDEX_MAPPING = {
             "index_group":       {"type": "keyword"},
             "lookback_seconds":  {"type": "float"},
             "lookback_field":    {"type": "keyword"},
+            "lookback_label":    {"type": "keyword"},
+            "query_body":        {"type": "keyword", "index": False, "doc_values": False, "ignore_above": 4096},
         }
     },
     "settings": {
@@ -125,6 +147,12 @@ def build_event(
         "client_id": client_id,
         "lookback_seconds": lookback.seconds if lookback else None,
         "lookback_field": lookback.field if lookback else None,
+        "lookback_label": lookback.label if lookback else None,
+        "query_body": (
+            body.decode("utf-8", errors="replace")[:4096]
+            if body and _query_body_enabled and _random.random() < _query_body_sample_rate
+            else None
+        ),
     }
 
 

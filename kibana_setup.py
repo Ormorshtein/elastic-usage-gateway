@@ -260,12 +260,12 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     # LOOKBACK VISUALIZATIONS (query time-range window analysis)
     # =========================================================
 
-    # Lookback Distribution — histogram showing how far back queries look (in hours)
-    HISTOGRAM_AXES = {
+    # Lookback Distribution — bar chart showing query count per lookback window (e.g. "1h", "24h", "7d")
+    LOOKBACK_BAR_AXES = {
         "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "bottom",
                           "show": True, "style": {}, "scale": {"type": "linear"},
                           "labels": {"show": True, "filter": True, "truncate": 100},
-                          "title": {"text": "Lookback (seconds)"}}],
+                          "title": {"text": "Lookback Window"}}],
         "valueAxes": [{"id": "ValueAxis-1", "name": "LeftAxis-1", "type": "value", "position": "left",
                        "show": True, "style": {}, "scale": {"type": "linear", "mode": "normal"},
                        "labels": {"show": True, "rotate": 0, "filter": False, "truncate": 100},
@@ -273,7 +273,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     }
     objects.append(_vis(
         "vis-lookback-distribution", "Lookback Window Distribution", "histogram",
-        {"type": "histogram", "grid": {"categoryLines": False}, **HISTOGRAM_AXES,
+        {"type": "histogram", "grid": {"categoryLines": False}, **LOOKBACK_BAR_AXES,
          "seriesParams": [{"show": True, "type": "histogram", "mode": "normal", "valueAxis": "ValueAxis-1",
                            "data": {"label": "Count", "id": "1"},
                            "drawLinesBetweenPoints": True, "lineWidth": 2, "showCircles": True}],
@@ -281,7 +281,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
          "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
         [
             {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
-            {"id": "2", "enabled": True, "type": "histogram", "params": {"field": "lookback_seconds", "interval": 3600, "min_doc_count": 1, "extended_bounds": {}}, "schema": "segment"},
+            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "lookback_label", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
         ],
         usage_dv_id,
     ))
@@ -320,6 +320,31 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         ],
         usage_dv_id,
     ))
+
+    # =========================================================
+    # RAW EVENTS TABLE (Saved Search — shows actual query bodies)
+    # =========================================================
+    objects.append({
+        "id": "search-usage-events",
+        "type": "search",
+        "attributes": {
+            "title": "Usage Events — Raw Queries",
+            "columns": ["timestamp", "index_group", "operation", "lookback_label", "path", "query_body", "response_status", "response_time_ms"],
+            "sort": [["timestamp", "desc"]],
+            "kibanaSavedObjectMeta": {
+                "searchSourceJSON": json.dumps({
+                    "index": usage_dv_id,
+                    "query": {"query": "", "language": "kuery"},
+                    "filter": [],
+                    "highlightAll": True,
+                    "version": True,
+                })
+            },
+        },
+        "references": [
+            {"id": usage_dv_id, "name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern"}
+        ],
+    })
 
     # Avg response time (line)
     objects.append(_vis(
@@ -492,6 +517,14 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         panel_ref(9,  "vis-response-time",         32, 31, 16, 12),
         panel_ref(10, "vis-lookback-distribution",  0, 43, 24, 14),   # lookback histogram
         panel_ref(11, "vis-lookback-fields",       24, 43, 24, 14),   # lookback date fields pie
+        # Raw events table (saved search — type "search" not "visualization")
+        {
+            "panelIndex": "12",
+            "gridData": {"x": 0, "y": 57, "w": 48, "h": 18, "i": "12"},
+            "version": "8.12.2",
+            "type": "search",
+            "panelRefName": "panel_12",
+        },
     ]
     usage_refs = [
         {"name": "panel_0",  "type": "visualization", "id": "vis-index-group-filter"},
@@ -506,6 +539,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         {"name": "panel_9",  "type": "visualization", "id": "vis-response-time"},
         {"name": "panel_10", "type": "visualization", "id": "vis-lookback-distribution"},
         {"name": "panel_11", "type": "visualization", "id": "vis-lookback-fields"},
+        {"name": "panel_12", "type": "search", "id": "search-usage-events"},
     ]
     objects.append({
         "id": "usage-heat",
