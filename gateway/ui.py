@@ -19,6 +19,12 @@ HTML_PAGE = """<!DOCTYPE html>
           padding: 20px; margin-bottom: 16px; }
   .card h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px;
              color: #888; margin-bottom: 16px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+  .tab { padding: 8px 16px; border-radius: 6px; border: 1px solid #3a3d47;
+         background: #0f1117; color: #888; font-size: 13px; font-weight: 600;
+         cursor: pointer; transition: all .15s; }
+  .tab:hover { border-color: #4f8ff7; color: #ccc; }
+  .tab.active { background: #1e2a3a; border-color: #4f8ff7; color: #4f8ff7; }
   .slider-row { display: flex; align-items: center; margin-bottom: 10px; gap: 12px; }
   .slider-label { width: 220px; font-size: 13px; color: #ccc; }
   .slider-row input[type=range] { flex: 1; accent-color: #4f8ff7; }
@@ -28,12 +34,13 @@ HTML_PAGE = """<!DOCTYPE html>
   .count-row label { font-size: 14px; color: #ccc; }
   .count-row input[type=number] { width: 120px; padding: 6px 10px; border-radius: 6px;
     border: 1px solid #3a3d47; background: #0f1117; color: #fff; font-size: 15px; }
-  .actions { display: flex; gap: 12px; margin-top: 8px; }
+  .actions { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
   button { padding: 10px 20px; border: none; border-radius: 6px; font-size: 14px;
            font-weight: 600; cursor: pointer; transition: opacity .15s; }
   button:hover { opacity: 0.85; }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-run { background: #4f8ff7; color: #fff; }
+  .btn-run-all { background: #27ae60; color: #fff; }
   .btn-clear { background: #e74c3c; color: #fff; }
   .btn-reset { background: #3a3d47; color: #ccc; }
   .status { margin-top: 16px; padding: 12px; border-radius: 6px; font-size: 13px;
@@ -59,7 +66,8 @@ HTML_PAGE = """<!DOCTYPE html>
 <p class="subtitle">Control Panel &mdash; generate traffic, observe heat</p>
 
 <div class="card">
-  <h2>Query Distribution</h2>
+  <h2>Scenario</h2>
+  <div class="tabs" id="scenario-tabs"></div>
   <div id="sliders"></div>
   <div class="count-row" style="margin-top: 16px;">
     <label for="count">Query count:</label>
@@ -70,7 +78,8 @@ HTML_PAGE = """<!DOCTYPE html>
 <div class="card">
   <h2>Actions</h2>
   <div class="actions">
-    <button class="btn-run" id="btn-run" onclick="runGenerator()">Run Generator</button>
+    <button class="btn-run" id="btn-run" onclick="runScenario()">Run Scenario</button>
+    <button class="btn-run-all" id="btn-run-all" onclick="runAllScenarios()">Run All Scenarios</button>
     <button class="btn-clear" id="btn-clear" onclick="clearStats()">Clear Stats</button>
     <button class="btn-reset" onclick="resetWeights()">Reset Weights</button>
   </div>
@@ -82,62 +91,89 @@ HTML_PAGE = """<!DOCTYPE html>
   <h2>Links</h2>
   <div class="links">
     <a href="http://localhost:5601/app/dashboards#/view/usage-heat" target="_blank">Usage &amp; Heat Dashboard</a>
-    <a href="http://localhost:5601/app/dashboards#/view/products-explorer" target="_blank">Products Explorer</a>
     <a href="/_gateway/heat" target="_blank">Heat Report (JSON)</a>
+    <a href="/_gateway/sample-events?count=10" target="_blank">Sample Events</a>
+    <a href="/_gateway/scenarios" target="_blank">Scenarios (JSON)</a>
     <a href="http://localhost:5601/app/discover" target="_blank">Discover (raw events)</a>
   </div>
 </div>
 
 <script>
-const DEFAULTS = {
-  search_by_title: 40,
-  filter_by_category_sort_by_price: 25,
-  aggregate_by_brand: 15,
-  range_on_rating: 10,
-  search_by_description: 5,
-  get_by_id: 3,
-  match_all: 2
-};
+let scenarios = {};
+let activeScenario = 'products';
 
-const LABELS = {
-  search_by_title: "Search by title",
-  filter_by_category_sort_by_price: "Filter category + sort price",
-  aggregate_by_brand: "Aggregate by brand",
-  range_on_rating: "Range on rating",
-  search_by_description: "Search by description",
-  get_by_id: "Get by ID",
-  match_all: "Match all"
-};
+async function loadScenarios() {
+  try {
+    const resp = await fetch('/_gateway/scenarios');
+    scenarios = await resp.json();
+    buildTabs();
+    switchScenario('products');
+  } catch (e) {
+    setStatus('Failed to load scenarios: ' + e.message, 'err');
+  }
+}
+
+function buildTabs() {
+  const container = document.getElementById('scenario-tabs');
+  container.innerHTML = '';
+  for (const [key, s] of Object.entries(scenarios)) {
+    const tab = document.createElement('div');
+    tab.className = 'tab' + (key === activeScenario ? ' active' : '');
+    tab.textContent = s.label;
+    tab.dataset.scenario = key;
+    tab.onclick = () => switchScenario(key);
+    container.appendChild(tab);
+  }
+}
+
+function switchScenario(key) {
+  activeScenario = key;
+  document.querySelectorAll('.tab').forEach(t => {
+    t.className = 'tab' + (t.dataset.scenario === key ? ' active' : '');
+  });
+  buildSliders();
+}
 
 function buildSliders() {
+  const s = scenarios[activeScenario];
+  if (!s) return;
   const container = document.getElementById('sliders');
   container.innerHTML = '';
-  for (const [key, def] of Object.entries(DEFAULTS)) {
-    const saved = localStorage.getItem('w_' + key);
+  for (const [key, def] of Object.entries(s.weights)) {
+    const storageKey = 'w_' + activeScenario + '_' + key;
+    const saved = localStorage.getItem(storageKey);
     const val = saved !== null ? parseInt(saved) : def;
-    container.innerHTML += `
-      <div class="slider-row">
-        <span class="slider-label">${LABELS[key]}</span>
-        <input type="range" min="0" max="100" value="${val}" id="s_${key}"
-               oninput="document.getElementById('v_${key}').textContent=this.value; localStorage.setItem('w_${key}',this.value)">
-        <span class="slider-value" id="v_${key}">${val}</span>
-      </div>`;
+    const label = s.labels[key] || key;
+    container.innerHTML += '<div class="slider-row">'
+      + '<span class="slider-label">' + label + '</span>'
+      + '<input type="range" min="0" max="100" value="' + val + '" id="s_' + key + '" '
+      + 'oninput="document.getElementById(\\'v_' + key + '\\').textContent=this.value; '
+      + 'localStorage.setItem(\\'w_' + activeScenario + '_' + key + '\\',this.value)">'
+      + '<span class="slider-value" id="v_' + key + '">' + val + '</span>'
+      + '</div>';
   }
 }
 
 function getWeights() {
+  const s = scenarios[activeScenario];
+  if (!s) return {};
   const w = {};
-  for (const key of Object.keys(DEFAULTS)) {
-    w[key] = parseInt(document.getElementById('s_' + key).value);
+  for (const key of Object.keys(s.weights)) {
+    const el = document.getElementById('s_' + key);
+    w[key] = el ? parseInt(el.value) : s.weights[key];
   }
   return w;
 }
 
 function resetWeights() {
-  for (const [key, def] of Object.entries(DEFAULTS)) {
-    document.getElementById('s_' + key).value = def;
-    document.getElementById('v_' + key).textContent = def;
-    localStorage.removeItem('w_' + key);
+  const s = scenarios[activeScenario];
+  if (!s) return;
+  for (const [key, def] of Object.entries(s.weights)) {
+    const el = document.getElementById('s_' + key);
+    const vel = document.getElementById('v_' + key);
+    if (el) el.value = def;
+    if (vel) vel.textContent = def;
+    localStorage.removeItem('w_' + activeScenario + '_' + key);
   }
 }
 
@@ -151,31 +187,41 @@ function setProgress(active) {
   document.getElementById('progress').className = active ? 'progress active' : 'progress';
 }
 
-async function runGenerator() {
-  const btn = document.getElementById('btn-run');
-  btn.disabled = true;
-  setStatus('Generating queries...', 'info');
+function setButtonsDisabled(disabled) {
+  document.getElementById('btn-run').disabled = disabled;
+  document.getElementById('btn-run-all').disabled = disabled;
+}
+
+async function runScenario(scenarioKey, count) {
+  const key = scenarioKey || activeScenario;
+  const cnt = count || parseInt(document.getElementById('count').value);
+  const weights = scenarioKey ? scenarios[key].weights : getWeights();
+
+  setButtonsDisabled(true);
+  setStatus('Running ' + (scenarios[key]?.label || key) + '...', 'info');
   setProgress(true);
   try {
     const resp = await fetch('/_gateway/generate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        count: parseInt(document.getElementById('count').value),
-        weights: getWeights()
-      })
+      body: JSON.stringify({ count: cnt, scenario: key, weights: weights })
     });
     const data = await resp.json();
     if (resp.ok) {
-      let msg = `Sent ${data.sent} queries in ${data.elapsed_seconds}s (${data.ok} ok, ${data.errors} errors)`;
+      const s = scenarios[key];
+      let msg = (s?.label || key) + ': sent ' + data.sent + ' queries in ' + data.elapsed_seconds + 's (' + data.ok + ' ok, ' + data.errors + ' errors)';
       if (data.breakdown) {
+        const labels = s?.labels || {};
         const lines = Object.entries(data.breakdown)
           .sort((a, b) => b[1] - a[1])
-          .map(([k, v]) => `${LABELS[k] || k}: ${v}`)
+          .map(([k, v]) => (labels[k] || k) + ': ' + v)
           .join(', ');
         msg += '\\n' + lines;
       }
       setStatus(msg, 'ok');
+      setProgress(false);
+      setButtonsDisabled(false);
+      return data;
     } else {
       setStatus('Error: ' + (data.detail || JSON.stringify(data)), 'err');
     }
@@ -183,7 +229,38 @@ async function runGenerator() {
     setStatus('Network error: ' + e.message, 'err');
   }
   setProgress(false);
-  btn.disabled = false;
+  setButtonsDisabled(false);
+  return null;
+}
+
+async function runAllScenarios() {
+  setButtonsDisabled(true);
+  setProgress(true);
+  const count = parseInt(document.getElementById('count').value);
+  const results = [];
+
+  for (const key of Object.keys(scenarios)) {
+    setStatus('Running ' + scenarios[key].label + '...', 'info');
+    try {
+      const resp = await fetch('/_gateway/generate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ count: count, scenario: key, weights: scenarios[key].weights })
+      });
+      const data = await resp.json();
+      if (resp.ok) {
+        results.push(scenarios[key].label + ': ' + data.sent + ' queries (' + data.ok + ' ok, ' + data.errors + ' errors) in ' + data.elapsed_seconds + 's');
+      } else {
+        results.push(scenarios[key].label + ': ERROR');
+      }
+    } catch (e) {
+      results.push(scenarios[key].label + ': NETWORK ERROR');
+    }
+  }
+
+  setStatus('All scenarios complete:\\n' + results.join('\\n'), 'ok');
+  setProgress(false);
+  setButtonsDisabled(false);
 }
 
 async function clearStats() {
@@ -195,7 +272,7 @@ async function clearStats() {
     const resp = await fetch('/_gateway/events', { method: 'DELETE' });
     const data = await resp.json();
     if (resp.ok) {
-      setStatus(`Deleted ${data.deleted} events`, 'ok');
+      setStatus('Deleted ' + data.deleted + ' events', 'ok');
     } else {
       setStatus('Error: ' + (data.detail || JSON.stringify(data)), 'err');
     }
@@ -205,7 +282,7 @@ async function clearStats() {
   btn.disabled = false;
 }
 
-buildSliders();
+loadScenarios();
 </script>
 </body>
 </html>

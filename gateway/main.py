@@ -3,9 +3,11 @@ FastAPI application — the ES Usage Gateway entry point.
 
 Routes:
   /_gateway/ui             — control panel UI (GET)
+  /_gateway/scenarios      — available scenarios (GET)
   /_gateway/generate       — run query generator (POST)
   /_gateway/events         — clear usage events (DELETE)
   /_gateway/heat           — heat analysis endpoint (GET)
+  /_gateway/sample-events  — recent usage events (GET)
   /_gateway/health         — gateway health check (GET)
   /{path:path}             — everything else proxied to Elasticsearch
 """
@@ -26,7 +28,7 @@ from gateway.events import build_event, emit_event, emit_event_background, ensur
 from gateway.analyzer import compute_heat
 from gateway.ui import HTML_PAGE
 import random as _random
-from generator.queries import DEFAULT_WEIGHTS, QUERY_FUNCTIONS
+from generator.queries import SCENARIOS, DEFAULT_WEIGHTS, QUERY_FUNCTIONS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,32 +90,59 @@ async def ui():
     return HTMLResponse(content=HTML_PAGE)
 
 
+@app.get("/_gateway/scenarios")
+async def get_scenarios():
+    """Return available scenarios with their weights and labels."""
+    result = {}
+    for key, scenario in SCENARIOS.items():
+        result[key] = {
+            "label": scenario["label"],
+            "index": scenario["index"],
+            "weights": scenario["weights"],
+            "labels": scenario["labels"],
+        }
+    return result
+
+
 class GenerateRequest(BaseModel):
     count: int = 200
-    weights: dict[str, int] = DEFAULT_WEIGHTS
+    scenario: str | None = None
+    weights: dict[str, int] | None = None
 
 
 @app.post("/_gateway/generate")
 async def generate(req: GenerateRequest):
     """
-    Run the query generator with custom weights.
+    Run the query generator for a scenario with custom weights.
 
     Sends queries directly to ES (not through the gateway proxy) and
     emits usage events for each one — same observation pipeline as real traffic.
     """
-    # Build weighted selection pool so we can track which type was picked
+    # Resolve scenario
+    scenario_key = req.scenario or "products"
+    if scenario_key not in SCENARIOS:
+        return JSONResponse(
+            content={"error": f"Unknown scenario: {scenario_key}", "available": list(SCENARIOS.keys())},
+            status_code=400,
+        )
+    scenario = SCENARIOS[scenario_key]
+    query_funcs = scenario["queries"]
+    default_weights = scenario["weights"]
+
+    # Build weighted selection pool
     funcs = []
     names = []
     w = []
-    for name, weight in req.weights.items():
-        if name in QUERY_FUNCTIONS and weight > 0:
-            funcs.append(QUERY_FUNCTIONS[name])
+    weights = req.weights or default_weights
+    for name, weight in weights.items():
+        if name in query_funcs and weight > 0:
+            funcs.append(query_funcs[name])
             names.append(name)
             w.append(weight)
     if not funcs:
-        funcs = list(QUERY_FUNCTIONS.values())
-        names = list(QUERY_FUNCTIONS.keys())
-        w = list(DEFAULT_WEIGHTS.values())
+        funcs = list(query_funcs.values())
+        names = list(query_funcs.keys())
+        w = list(default_weights.values())
 
     async with httpx.AsyncClient(base_url=ES_HOST, timeout=30.0) as client:
         sent = 0
