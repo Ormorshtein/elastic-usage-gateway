@@ -48,6 +48,9 @@ USAGE_INDEX_MAPPING = {
             "response_time_ms":  {"type": "float"},
             "response_status":   {"type": "integer"},
             "client_id":         {"type": "keyword"},
+            "index_group":       {"type": "keyword"},
+            "lookback_seconds":  {"type": "float"},
+            "lookback_field":    {"type": "keyword"},
         }
     },
     "settings": {
@@ -101,12 +104,16 @@ def build_event(
     client_id: str | None = None,
     language: str = "dsl",
     body: bytes = b"",
+    index_group: str | None = None,
 ) -> dict:
     """Build a usage event document."""
+    idx = index_name or "_unknown"
+    lookback = field_refs.lookback
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "cluster_id": CLUSTER_ID,
-        "index": index_name or "_unknown",
+        "index": idx,
+        "index_group": index_group or idx,
         "operation": operation,
         "http_method": method,
         "path": path,
@@ -116,6 +123,8 @@ def build_event(
         "response_time_ms": elapsed_ms,
         "response_status": response_status,
         "client_id": client_id,
+        "lookback_seconds": lookback.seconds if lookback else None,
+        "lookback_field": lookback.field if lookback else None,
     }
 
 

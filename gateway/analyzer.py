@@ -5,6 +5,9 @@ Formulas:
   index_heat = total_operations / time_window_hours
   field_heat = field_references / total_field_references_in_index
 
+Report is grouped by `index_group` (alias/data stream), with nested
+concrete indices and per-index field breakdowns.
+
 Thresholds are configurable via config.py.
 """
 
@@ -80,38 +83,104 @@ def _recommend_field(field_name: str, tier: str, cats: dict[str, int]) -> str | 
     return None
 
 
-async def compute_heat(time_window_hours: float = 24.0) -> dict:
+def _compute_index_heat(bucket: dict, time_window_hours: float) -> dict:
+    """Compute heat report for a single concrete index bucket."""
+    total_ops = bucket["doc_count"]
+    ops_per_hour = total_ops / max(time_window_hours, 0.01)
+    tier = _index_tier(ops_per_hour)
+
+    # Collect field counts across all categories
+    field_counts: dict[str, dict[str, int]] = defaultdict(lambda: {
+        cat: 0 for cat in FIELD_CATEGORIES
+    })
+    total_field_refs = 0
+
+    for category in FIELD_CATEGORIES:
+        agg_key = f"field_{category}"
+        for fb in bucket.get(agg_key, {}).get("buckets", []):
+            field_name = fb["key"]
+            count = fb["doc_count"]
+            field_counts[field_name][category] = count
+            total_field_refs += count
+
+    # Compute per-field heat
+    fields_report = {}
+    field_recommendations = []
+    for field_name, cats in sorted(field_counts.items()):
+        field_total = sum(cats.values())
+        proportion = field_total / max(total_field_refs, 1)
+        field_t = _field_tier(proportion)
+        fields_report[field_name] = {
+            "heat": round(proportion, 4),
+            "tier": field_t,
+            **cats,
+        }
+        rec = _recommend_field(field_name, field_t, cats)
+        if rec:
+            field_recommendations.append(rec)
+
+    index_recommendations = _recommend_index(tier, ops_per_hour)
+    index_recommendations.extend(field_recommendations)
+
+    return {
+        "heat_score": round(ops_per_hour, 2),
+        "tier": tier,
+        "total_operations": total_ops,
+        "fields": fields_report,
+        "recommendations": index_recommendations,
+    }
+
+
+# Field sub-aggregations shared by both query structures
+_FIELD_SUB_AGGS = {
+    f"field_{cat}": {"terms": {"field": f"fields.{cat}", "size": 500}}
+    for cat in FIELD_CATEGORIES
+}
+
+
+async def compute_heat(time_window_hours: float = 24.0,
+                       index_group: str | None = None) -> dict:
     """
-    Compute heat report for all indices observed in the usage events.
+    Compute heat report grouped by index_group, with nested concrete indices.
 
     Returns a structured dict suitable for JSON response.
     """
-    # Query all usage events within the time window
+    # Build query
+    must_clauses = [
+        {"range": {"timestamp": {"gte": f"now-{int(time_window_hours)}h"}}}
+    ]
+    if index_group:
+        must_clauses.append({"term": {"index_group": index_group}})
+
     query = {
         "size": 0,
-        "query": {
-            "range": {
-                "timestamp": {
-                    "gte": f"now-{int(time_window_hours)}h",
-                }
-            }
-        },
+        "query": {"bool": {"must": must_clauses}},
         "aggs": {
-            "by_index": {
+            "by_group": {
                 "terms": {
-                    "field": "index",
-                    "size": 1000,
+                    "field": "index_group",
+                    "size": 100,
                 },
                 "aggs": {
-                    "field_queried":    {"terms": {"field": "fields.queried",    "size": 500}},
-                    "field_filtered":   {"terms": {"field": "fields.filtered",   "size": 500}},
-                    "field_aggregated": {"terms": {"field": "fields.aggregated", "size": 500}},
-                    "field_sorted":     {"terms": {"field": "fields.sorted",     "size": 500}},
-                    "field_sourced":    {"terms": {"field": "fields.sourced",    "size": 500}},
-                    "field_written":    {"terms": {"field": "fields.written",    "size": 500}},
-                }
-            }
-        }
+                    "by_index": {
+                        "terms": {
+                            "field": "index",
+                            "size": 1000,
+                        },
+                        "aggs": _FIELD_SUB_AGGS,
+                    },
+                    "lookback_avg": {"avg": {"field": "lookback_seconds"}},
+                    "lookback_max": {"max": {"field": "lookback_seconds"}},
+                    "lookback_percentiles": {
+                        "percentiles": {
+                            "field": "lookback_seconds",
+                            "percents": [50],
+                        },
+                    },
+                    "lookback_count": {"value_count": {"field": "lookback_seconds"}},
+                },
+            },
+        },
     }
 
     try:
@@ -125,55 +194,47 @@ async def compute_heat(time_window_hours: float = 24.0) -> dict:
         return {"error": str(exc)}
 
     # Parse aggregation results
-    indices = {}
+    groups = {}
     summary_by_tier: dict[str, list[str]] = {"hot": [], "warm": [], "cold": [], "frozen": []}
 
-    for bucket in data.get("aggregations", {}).get("by_index", {}).get("buckets", []):
-        index_name = bucket["key"]
-        total_ops = bucket["doc_count"]
-        ops_per_hour = total_ops / max(time_window_hours, 0.01)
-        tier = _index_tier(ops_per_hour)
-        summary_by_tier[tier].append(index_name)
+    for group_bucket in data.get("aggregations", {}).get("by_group", {}).get("buckets", []):
+        group_name = group_bucket["key"]
+        group_total_ops = group_bucket["doc_count"]
+        group_ops_per_hour = group_total_ops / max(time_window_hours, 0.01)
+        group_tier = _index_tier(group_ops_per_hour)
+        summary_by_tier[group_tier].append(group_name)
 
-        # Collect field counts across all categories
-        field_counts: dict[str, dict[str, int]] = defaultdict(lambda: {
-            cat: 0 for cat in FIELD_CATEGORIES
-        })
-        total_field_refs = 0
+        # Process concrete indices within this group
+        indices = {}
+        group_recommendations = _recommend_index(group_tier, group_ops_per_hour)
 
-        for category in FIELD_CATEGORIES:
-            agg_key = f"field_{category}"
-            for fb in bucket.get(agg_key, {}).get("buckets", []):
-                field_name = fb["key"]
-                count = fb["doc_count"]
-                field_counts[field_name][category] = count
-                total_field_refs += count
+        for index_bucket in group_bucket.get("by_index", {}).get("buckets", []):
+            index_name = index_bucket["key"]
+            index_report = _compute_index_heat(index_bucket, time_window_hours)
+            indices[index_name] = index_report
+            # Bubble up field recommendations from concrete indices
+            group_recommendations.extend(index_report.get("recommendations", []))
 
-        # Compute per-field heat
-        fields_report = {}
-        field_recommendations = []
-        for field_name, cats in sorted(field_counts.items()):
-            field_total = sum(cats.values())
-            proportion = field_total / max(total_field_refs, 1)
-            field_t = _field_tier(proportion)
-            fields_report[field_name] = {
-                "heat": round(proportion, 4),
-                "tier": field_t,
-                **cats,
-            }
-            rec = _recommend_field(field_name, field_t, cats)
-            if rec:
-                field_recommendations.append(rec)
+        # Parse lookback stats
+        lb_avg = group_bucket.get("lookback_avg", {}).get("value")
+        lb_max = group_bucket.get("lookback_max", {}).get("value")
+        lb_p50_vals = group_bucket.get("lookback_percentiles", {}).get("values", {})
+        lb_p50 = lb_p50_vals.get("50.0")
+        lb_with = int(group_bucket.get("lookback_count", {}).get("value", 0))
 
-        index_recommendations = _recommend_index(tier, ops_per_hour)
-        index_recommendations.extend(field_recommendations)
-
-        indices[index_name] = {
-            "heat_score": round(ops_per_hour, 2),
-            "tier": tier,
-            "total_operations": total_ops,
-            "fields": fields_report,
-            "recommendations": index_recommendations,
+        groups[group_name] = {
+            "heat_score": round(group_ops_per_hour, 2),
+            "tier": group_tier,
+            "total_operations": group_total_ops,
+            "indices": indices,
+            "lookback": {
+                "avg_seconds": round(lb_avg, 1) if lb_avg is not None else None,
+                "max_seconds": round(lb_max, 1) if lb_max is not None else None,
+                "p50_seconds": round(lb_p50, 1) if lb_p50 is not None else None,
+                "queries_with_lookback": lb_with,
+                "queries_total": group_total_ops,
+            },
+            "recommendations": group_recommendations,
         }
 
     # Remove empty tiers from summary
@@ -182,8 +243,8 @@ async def compute_heat(time_window_hours: float = 24.0) -> dict:
     return {
         "time_window": f"last_{int(time_window_hours)}h",
         "summary": {
-            "total_indices": len(indices),
+            "total_groups": len(groups),
             "by_tier": summary_by_tier,
         },
-        "indices": indices,
+        "groups": groups,
     }

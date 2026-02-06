@@ -66,6 +66,7 @@ async def proxy_request(request: Request) -> tuple[Response, dict]:
         "path": request.url.path,
         "method": method,
         "body": body,
+        "response_body": es_response.content,
         "response_status": es_response.status_code,
         "elapsed_ms": round(elapsed_ms, 2),
     }

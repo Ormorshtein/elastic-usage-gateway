@@ -1,6 +1,6 @@
-"""Tests for gateway.analyzer — tier classification and recommendations."""
+"""Tests for gateway.analyzer — tier classification, recommendations, and heat computation."""
 
-from gateway.analyzer import _index_tier, _field_tier, _recommend_index, _recommend_field
+from gateway.analyzer import _index_tier, _field_tier, _recommend_index, _recommend_field, _compute_index_heat
 
 
 class TestIndexTier:
@@ -107,3 +107,55 @@ class TestRecommendField:
         cats = {"queried": 50, "filtered": 0, "aggregated": 0, "sorted": 0, "sourced": 0, "written": 0}
         rec = _recommend_field("title", "hot", cats)
         assert rec is None
+
+
+class TestComputeIndexHeat:
+    """_compute_index_heat processes a single ES aggregation bucket."""
+
+    def test_basic_structure(self):
+        bucket = {
+            "doc_count": 240,
+            "field_queried": {"buckets": [{"key": "title", "doc_count": 100}]},
+            "field_filtered": {"buckets": [{"key": "category", "doc_count": 50}]},
+            "field_aggregated": {"buckets": []},
+            "field_sorted": {"buckets": [{"key": "price", "doc_count": 30}]},
+            "field_sourced": {"buckets": [{"key": "title", "doc_count": 80}]},
+            "field_written": {"buckets": []},
+        }
+        result = _compute_index_heat(bucket, time_window_hours=24.0)
+        assert result["total_operations"] == 240
+        assert result["heat_score"] == 10.0  # 240/24
+        assert result["tier"] == "cold"  # 10.0 is not > 10
+        assert "title" in result["fields"]
+        assert "category" in result["fields"]
+        assert "price" in result["fields"]
+        assert isinstance(result["recommendations"], list)
+
+    def test_hot_tier(self):
+        bucket = {"doc_count": 2500}
+        # No field aggs
+        for cat in ("queried", "filtered", "aggregated", "sorted", "sourced", "written"):
+            bucket[f"field_{cat}"] = {"buckets": []}
+        result = _compute_index_heat(bucket, time_window_hours=24.0)
+        assert result["tier"] == "hot"
+        assert result["heat_score"] > 100
+
+    def test_field_proportions(self):
+        bucket = {
+            "doc_count": 100,
+            "field_queried": {"buckets": [
+                {"key": "title", "doc_count": 80},
+                {"key": "description", "doc_count": 10},
+            ]},
+            "field_filtered": {"buckets": []},
+            "field_aggregated": {"buckets": []},
+            "field_sorted": {"buckets": []},
+            "field_sourced": {"buckets": [{"key": "title", "doc_count": 10}]},
+            "field_written": {"buckets": []},
+        }
+        result = _compute_index_heat(bucket, time_window_hours=24.0)
+        # total_field_refs = 80 + 10 + 10 = 100
+        # title: (80+10)/100 = 0.9 → hot
+        # description: 10/100 = 0.1 → warm
+        assert result["fields"]["title"]["tier"] == "hot"
+        assert result["fields"]["description"]["tier"] == "warm"

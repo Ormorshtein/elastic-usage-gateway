@@ -7,8 +7,8 @@ which has a stable, documented format.
 
 Dashboards created:
   1. Products Explorer       — data table of seeded products
-  2. Usage & Heat            — query traffic patterns + field heat
-  3. Multi-Index Comparison  — cross-index heat and operations
+  2. Usage & Heat            — query traffic patterns + field heat (with index_group filter)
+  3. Multi-Index Comparison  — cross-index-group heat and operations
 
 Usage:
     python kibana_setup.py
@@ -170,6 +170,46 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     # USAGE & HEAT VISUALIZATIONS
     # =========================================================
 
+    # Index Group filter control (dropdown)
+    objects.append(_vis(
+        "vis-index-group-filter", "Index Group Filter", "input_control_vis",
+        {
+            "controls": [
+                {
+                    "id": "1",
+                    "fieldName": "index_group",
+                    "label": "Index Group",
+                    "type": "list",
+                    "options": {
+                        "type": "terms",
+                        "multiselect": True,
+                        "dynamicOptions": True,
+                        "size": 20,
+                        "order": "desc",
+                    },
+                    "parent": "",
+                    "indexPattern": usage_dv_id,
+                },
+            ],
+            "updateFiltersOnChange": True,
+            "useTimeFilter": True,
+            "pinFilters": False,
+        },
+        [],  # no aggs for input_control_vis
+        usage_dv_id,
+    ))
+
+    # Concrete Indices table (shows individual indices within the filtered group)
+    objects.append(_vis(
+        "vis-concrete-indices", "Concrete Indices", "table", TABLE_PARAMS,
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index", "size": 50, "order": "desc", "orderBy": "1"}, "schema": "bucket"},
+            {"id": "3", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "bucket"},
+        ],
+        usage_dv_id,
+    ))
+
     # Operations over time (area chart)
     objects.append(_vis(
         "vis-ops-over-time", "Operations Over Time", "area",
@@ -216,6 +256,71 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             usage_dv_id,
         ))
 
+    # =========================================================
+    # LOOKBACK VISUALIZATIONS (query time-range window analysis)
+    # =========================================================
+
+    # Lookback Distribution — histogram showing how far back queries look (in hours)
+    HISTOGRAM_AXES = {
+        "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "bottom",
+                          "show": True, "style": {}, "scale": {"type": "linear"},
+                          "labels": {"show": True, "filter": True, "truncate": 100},
+                          "title": {"text": "Lookback (seconds)"}}],
+        "valueAxes": [{"id": "ValueAxis-1", "name": "LeftAxis-1", "type": "value", "position": "left",
+                       "show": True, "style": {}, "scale": {"type": "linear", "mode": "normal"},
+                       "labels": {"show": True, "rotate": 0, "filter": False, "truncate": 100},
+                       "title": {"text": "Query Count"}}],
+    }
+    objects.append(_vis(
+        "vis-lookback-distribution", "Lookback Window Distribution", "histogram",
+        {"type": "histogram", "grid": {"categoryLines": False}, **HISTOGRAM_AXES,
+         "seriesParams": [{"show": True, "type": "histogram", "mode": "normal", "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Count", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2, "showCircles": True}],
+         "addTooltip": True, "addLegend": False,
+         "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "histogram", "params": {"field": "lookback_seconds", "interval": 3600, "min_doc_count": 1, "extended_bounds": {}}, "schema": "segment"},
+        ],
+        usage_dv_id,
+    ))
+
+    # Avg Lookback by Group — horizontal bar showing avg lookback per index_group
+    objects.append(_vis(
+        "vis-lookback-by-group", "Avg Lookback by Group", "horizontal_bar",
+        {"type": "horizontal_bar", "grid": {"categoryLines": False},
+         "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "left",
+                           "show": True, "style": {}, "scale": {"type": "linear"},
+                           "labels": {"show": True, "filter": True, "truncate": 100}, "title": {}}],
+         "valueAxes": [{"id": "ValueAxis-1", "name": "BottomAxis-1", "type": "value", "position": "bottom",
+                        "show": True, "style": {}, "scale": {"type": "linear", "mode": "normal"},
+                        "labels": {"show": True, "rotate": 0, "filter": False, "truncate": 100},
+                        "title": {"text": "Avg Lookback (seconds)"}}],
+         "seriesParams": [{"show": True, "type": "histogram", "mode": "normal", "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Avg lookback_seconds", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2, "showCircles": True}],
+         "addTooltip": True, "addLegend": False,
+         "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "avg", "params": {"field": "lookback_seconds"}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
+        ],
+        usage_dv_id,
+    ))
+
+    # Lookback Date Fields — pie chart showing which date fields are used for time filtering
+    objects.append(_vis(
+        "vis-lookback-fields", "Lookback Date Fields", "pie",
+        {"type": "pie", "addTooltip": True, "addLegend": True, "legendPosition": "right", "isDonut": True,
+         "labels": {"show": True, "values": True, "last_level": True, "truncate": 100}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "lookback_field", "size": 10, "order": "desc", "orderBy": "1"}, "schema": "segment"},
+        ],
+        usage_dv_id,
+    ))
+
     # Avg response time (line)
     objects.append(_vis(
         "vis-response-time", "Avg Response Time (ms)", "line",
@@ -233,12 +338,12 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     ))
 
     # =========================================================
-    # MULTI-INDEX COMPARISON VISUALIZATIONS
+    # MULTI-INDEX COMPARISON VISUALIZATIONS (grouped by index_group)
     # =========================================================
 
-    # Operations by Index (horizontal bar)
+    # Operations by Index Group (horizontal bar)
     objects.append(_vis(
-        "vis-ops-by-index", "Operations by Index", "horizontal_bar",
+        "vis-ops-by-index", "Operations by Index Group", "horizontal_bar",
         {"type": "horizontal_bar", "grid": {"categoryLines": False},
          "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "left",
                            "show": True, "style": {}, "scale": {"type": "linear"},
@@ -254,14 +359,14 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
          "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
         [
             {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
-            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
+            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
         ],
         usage_dv_id,
     ))
 
-    # Operations Over Time by Index (area, split by index)
+    # Operations Over Time by Index Group (area, split by index_group)
     objects.append(_vis(
-        "vis-ops-over-time-by-index", "Operations Over Time by Index", "area",
+        "vis-ops-over-time-by-index", "Operations Over Time by Group", "area",
         {"type": "area", "grid": {"categoryLines": False}, **AREA_AXES,
          "seriesParams": [{"show": True, "type": "area", "mode": "stacked", "valueAxis": "ValueAxis-1",
                            "data": {"label": "Count", "id": "1"},
@@ -271,14 +376,14 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         [
             {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
             {"id": "2", "enabled": True, "type": "date_histogram", "params": {"field": "timestamp", "useNormalizedEsInterval": True, "scaleMetricValues": False, "interval": "auto", "drop_partials": False, "min_doc_count": 1, "extended_bounds": {}}, "schema": "segment"},
-            {"id": "3", "enabled": True, "type": "terms", "params": {"field": "index", "size": 10, "order": "desc", "orderBy": "1"}, "schema": "group"},
+            {"id": "3", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 10, "order": "desc", "orderBy": "1"}, "schema": "group"},
         ],
         usage_dv_id,
     ))
 
-    # Operations by Index + Operation (horizontal bar, split)
+    # Operations by Index Group + Operation (horizontal bar, split)
     objects.append(_vis(
-        "vis-ops-by-index-operation", "Operations by Index & Type", "horizontal_bar",
+        "vis-ops-by-index-operation", "Operations by Group & Type", "horizontal_bar",
         {"type": "horizontal_bar", "grid": {"categoryLines": False},
          "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "left",
                            "show": True, "style": {}, "scale": {"type": "linear"},
@@ -294,15 +399,15 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
          "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
         [
             {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
-            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
+            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
             {"id": "3", "enabled": True, "type": "terms", "params": {"field": "operation", "size": 10, "order": "desc", "orderBy": "1"}, "schema": "group"},
         ],
         usage_dv_id,
     ))
 
-    # Avg Response Time by Index (horizontal bar)
+    # Avg Response Time by Index Group (horizontal bar)
     objects.append(_vis(
-        "vis-response-time-by-index", "Avg Response Time by Index", "horizontal_bar",
+        "vis-response-time-by-index", "Avg Response Time by Group", "horizontal_bar",
         {"type": "horizontal_bar", "grid": {"categoryLines": False},
          "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "left",
                            "show": True, "style": {}, "scale": {"type": "linear"},
@@ -318,7 +423,18 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
          "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
         [
             {"id": "1", "enabled": True, "type": "avg", "params": {"field": "response_time_ms"}, "schema": "metric"},
-            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
+            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
+        ],
+        usage_dv_id,
+    ))
+
+    # Concrete Indices drill-down for multi-index (shows concrete index within groups)
+    objects.append(_vis(
+        "vis-concrete-indices-comparison", "Concrete Indices Breakdown", "table", TABLE_PARAMS,
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "bucket"},
+            {"id": "3", "enabled": True, "type": "terms", "params": {"field": "index", "size": 50, "order": "desc", "orderBy": "1"}, "schema": "bucket"},
         ],
         usage_dv_id,
     ))
@@ -352,7 +468,9 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             "title": "Products Explorer",
             "panelsJSON": json.dumps(products_panels),
             "optionsJSON": json.dumps({"useMargins": True, "syncColors": True, "syncCursor": True, "syncTooltips": False, "hidePanelTitles": False}),
-            "timeRestore": False,
+            "timeRestore": True,
+            "timeTo": "now",
+            "timeFrom": "now-10y",
             "kibanaSavedObjectMeta": {
                 "searchSourceJSON": json.dumps({"query": {"query": "", "language": "kuery"}, "filter": []})
             },
@@ -360,26 +478,34 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "references": products_refs,
     })
 
-    # Usage & Heat dashboard
+    # Usage & Heat dashboard (with index_group filter at top)
     usage_panels = [
-        panel_ref(0, "vis-ops-over-time",   0,  0, 30, 12),
-        panel_ref(1, "vis-query-types",     30,  0, 18, 12),
-        panel_ref(2, "vis-top-queried",      0, 12, 16, 14),
-        panel_ref(3, "vis-top-filtered",    16, 12, 16, 14),
-        panel_ref(4, "vis-top-aggregated",  32, 12, 16, 14),
-        panel_ref(5, "vis-top-sorted",       0, 26, 16, 12),
-        panel_ref(6, "vis-top-sourced",     16, 26, 16, 12),
-        panel_ref(7, "vis-response-time",   32, 26, 16, 12),
+        panel_ref(0,  "vis-index-group-filter",    0,  0, 48,  5),   # filter control at top, full width
+        panel_ref(1,  "vis-concrete-indices",       0,  5, 18, 12),   # concrete indices table
+        panel_ref(2,  "vis-ops-over-time",         18,  5, 18, 12),   # ops over time
+        panel_ref(3,  "vis-query-types",           36,  5, 12, 12),   # query type pie
+        panel_ref(4,  "vis-top-queried",            0, 17, 16, 14),
+        panel_ref(5,  "vis-top-filtered",          16, 17, 16, 14),
+        panel_ref(6,  "vis-top-aggregated",        32, 17, 16, 14),
+        panel_ref(7,  "vis-top-sorted",             0, 31, 16, 12),
+        panel_ref(8,  "vis-top-sourced",           16, 31, 16, 12),
+        panel_ref(9,  "vis-response-time",         32, 31, 16, 12),
+        panel_ref(10, "vis-lookback-distribution",  0, 43, 24, 14),   # lookback histogram
+        panel_ref(11, "vis-lookback-fields",       24, 43, 24, 14),   # lookback date fields pie
     ]
     usage_refs = [
-        {"name": "panel_0", "type": "visualization", "id": "vis-ops-over-time"},
-        {"name": "panel_1", "type": "visualization", "id": "vis-query-types"},
-        {"name": "panel_2", "type": "visualization", "id": "vis-top-queried"},
-        {"name": "panel_3", "type": "visualization", "id": "vis-top-filtered"},
-        {"name": "panel_4", "type": "visualization", "id": "vis-top-aggregated"},
-        {"name": "panel_5", "type": "visualization", "id": "vis-top-sorted"},
-        {"name": "panel_6", "type": "visualization", "id": "vis-top-sourced"},
-        {"name": "panel_7", "type": "visualization", "id": "vis-response-time"},
+        {"name": "panel_0",  "type": "visualization", "id": "vis-index-group-filter"},
+        {"name": "panel_1",  "type": "visualization", "id": "vis-concrete-indices"},
+        {"name": "panel_2",  "type": "visualization", "id": "vis-ops-over-time"},
+        {"name": "panel_3",  "type": "visualization", "id": "vis-query-types"},
+        {"name": "panel_4",  "type": "visualization", "id": "vis-top-queried"},
+        {"name": "panel_5",  "type": "visualization", "id": "vis-top-filtered"},
+        {"name": "panel_6",  "type": "visualization", "id": "vis-top-aggregated"},
+        {"name": "panel_7",  "type": "visualization", "id": "vis-top-sorted"},
+        {"name": "panel_8",  "type": "visualization", "id": "vis-top-sourced"},
+        {"name": "panel_9",  "type": "visualization", "id": "vis-response-time"},
+        {"name": "panel_10", "type": "visualization", "id": "vis-lookback-distribution"},
+        {"name": "panel_11", "type": "visualization", "id": "vis-lookback-fields"},
     ]
     objects.append({
         "id": "usage-heat",
@@ -398,18 +524,24 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "references": usage_refs,
     })
 
-    # Multi-Index Comparison dashboard
+    # Multi-Index Comparison dashboard (using index_group, same filter control by reference)
     comparison_panels = [
-        panel_ref(0, "vis-ops-by-index",              0,  0, 24, 14),
-        panel_ref(1, "vis-ops-by-index-operation",    24,  0, 24, 14),
-        panel_ref(2, "vis-ops-over-time-by-index",     0, 14, 32, 14),
-        panel_ref(3, "vis-response-time-by-index",    32, 14, 16, 14),
+        panel_ref(0, "vis-index-group-filter",         0,  0, 48,  5),   # same filter control as Usage & Heat
+        panel_ref(1, "vis-ops-by-index",               0,  5, 24, 14),
+        panel_ref(2, "vis-ops-by-index-operation",    24,  5, 24, 14),
+        panel_ref(3, "vis-ops-over-time-by-index",     0, 19, 32, 14),
+        panel_ref(4, "vis-response-time-by-index",    32, 19, 16, 14),
+        panel_ref(5, "vis-lookback-by-group",          0, 33, 24, 14),   # avg lookback by group
+        panel_ref(6, "vis-concrete-indices-comparison", 24, 33, 24, 14),
     ]
     comparison_refs = [
-        {"name": "panel_0", "type": "visualization", "id": "vis-ops-by-index"},
-        {"name": "panel_1", "type": "visualization", "id": "vis-ops-by-index-operation"},
-        {"name": "panel_2", "type": "visualization", "id": "vis-ops-over-time-by-index"},
-        {"name": "panel_3", "type": "visualization", "id": "vis-response-time-by-index"},
+        {"name": "panel_0", "type": "visualization", "id": "vis-index-group-filter"},
+        {"name": "panel_1", "type": "visualization", "id": "vis-ops-by-index"},
+        {"name": "panel_2", "type": "visualization", "id": "vis-ops-by-index-operation"},
+        {"name": "panel_3", "type": "visualization", "id": "vis-ops-over-time-by-index"},
+        {"name": "panel_4", "type": "visualization", "id": "vis-response-time-by-index"},
+        {"name": "panel_5", "type": "visualization", "id": "vis-lookback-by-group"},
+        {"name": "panel_6", "type": "visualization", "id": "vis-concrete-indices-comparison"},
     ]
     objects.append({
         "id": "multi-index-comparison",
@@ -467,10 +599,10 @@ def main():
 
     # --- Data Views (with fixed IDs so visualizations can reference them) ---
     print("\nCreating data views...")
-    products_dv_id = create_data_view(base, "products", "Products", "dv-products", time_field="created_at")
+    products_dv_id = create_data_view(base, "products", "Products", "dv-products")
     usage_dv_id = create_data_view(base, ".usage-events", "Usage Events", "dv-usage-events", time_field="timestamp")
-    logs_dv_id = create_data_view(base, "logs", "Logs", "dv-logs", time_field="timestamp")
-    orders_dv_id = create_data_view(base, "orders", "Orders", "dv-orders", time_field="order_date")
+    logs_dv_id = create_data_view(base, "logs*", "Logs", "dv-logs", time_field="timestamp")
+    orders_dv_id = create_data_view(base, "orders*", "Orders", "dv-orders", time_field="order_date")
 
     # --- Build and import all visualizations + dashboards ---
     print("\nImporting visualizations and dashboards...")

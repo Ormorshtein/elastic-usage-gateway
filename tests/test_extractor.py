@@ -332,3 +332,60 @@ class TestFieldRefs:
             written={"f"},
         )
         assert refs.all_fields == {"a", "b", "c", "d", "e", "f"}
+
+
+# --- Lookback extraction ---
+
+class TestLookbackExtraction:
+    def test_range_with_now_hours(self):
+        body = {"query": {"range": {"timestamp": {"gte": "now-24h"}}}}
+        refs = extract_fields_from_search(body)
+        assert refs.lookback is not None
+        assert refs.lookback.seconds == 86400
+        assert refs.lookback.field == "timestamp"
+
+    def test_range_with_now_days(self):
+        body = {"query": {"range": {"order_date": {"gte": "now-30d"}}}}
+        refs = extract_fields_from_search(body)
+        assert refs.lookback is not None
+        assert refs.lookback.seconds == 2592000
+        assert refs.lookback.field == "order_date"
+
+    def test_range_with_now_minutes(self):
+        body = {"query": {"range": {"timestamp": {"gte": "now-15m"}}}}
+        refs = extract_fields_from_search(body)
+        assert refs.lookback.seconds == 900
+
+    def test_range_with_gt(self):
+        body = {"query": {"range": {"timestamp": {"gt": "now-6h"}}}}
+        refs = extract_fields_from_search(body)
+        assert refs.lookback.seconds == 21600
+
+    def test_numeric_range_no_lookback(self):
+        body = {"query": {"range": {"price": {"gte": 100, "lte": 500}}}}
+        refs = extract_fields_from_search(body)
+        assert refs.lookback is None
+
+    def test_no_range_no_lookback(self):
+        body = {"query": {"match": {"title": "laptop"}}}
+        refs = extract_fields_from_search(body)
+        assert refs.lookback is None
+
+    def test_multiple_ranges_takes_max(self):
+        body = {"query": {"bool": {"filter": [
+            {"range": {"timestamp": {"gte": "now-1h"}}},
+            {"range": {"created_at": {"gte": "now-7d"}}},
+        ]}}}
+        refs = extract_fields_from_search(body)
+        assert refs.lookback is not None
+        assert refs.lookback.seconds == 604800
+        assert refs.lookback.field == "created_at"
+
+    def test_empty_body_no_lookback(self):
+        refs = extract_fields_from_search({})
+        assert refs.lookback is None
+
+    def test_absolute_date_not_parsed(self):
+        body = {"query": {"range": {"timestamp": {"gte": "2026-01-01"}}}}
+        refs = extract_fields_from_search(body)
+        assert refs.lookback is None

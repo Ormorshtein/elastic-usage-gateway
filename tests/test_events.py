@@ -107,3 +107,48 @@ class TestBuildEvent:
             client_id="my-app",
         )
         assert event["client_id"] == "my-app"
+
+    def test_index_group_explicit(self):
+        refs = FieldRefs()
+        event = build_event(
+            index_name="logs-2026.02.04", operation="search", field_refs=refs,
+            method="POST", path="/logs/_search", response_status=200, elapsed_ms=0,
+            index_group="logs",
+        )
+        assert event["index_group"] == "logs"
+        assert event["index"] == "logs-2026.02.04"
+
+    def test_index_group_defaults_to_index(self):
+        refs = FieldRefs()
+        event = build_event(
+            index_name="products", operation="search", field_refs=refs,
+            method="POST", path="/products/_search", response_status=200, elapsed_ms=0,
+        )
+        assert event["index_group"] == "products"
+
+    def test_index_group_none_index_defaults_to_unknown(self):
+        refs = FieldRefs()
+        event = build_event(
+            index_name=None, operation="bulk", field_refs=refs,
+            method="POST", path="/_bulk", response_status=200, elapsed_ms=0,
+        )
+        assert event["index_group"] == "_unknown"
+
+    def test_lookback_fields_present(self):
+        from gateway.extractor import LookbackInfo
+        refs = FieldRefs(lookback=LookbackInfo(seconds=86400, field="timestamp"))
+        event = build_event(
+            index_name="logs", operation="search", field_refs=refs,
+            method="POST", path="/logs/_search", response_status=200, elapsed_ms=10,
+        )
+        assert event["lookback_seconds"] == 86400
+        assert event["lookback_field"] == "timestamp"
+
+    def test_lookback_null_when_absent(self):
+        refs = FieldRefs()
+        event = build_event(
+            index_name="products", operation="search", field_refs=refs,
+            method="POST", path="/products/_search", response_status=200, elapsed_ms=10,
+        )
+        assert event["lookback_seconds"] is None
+        assert event["lookback_field"] is None

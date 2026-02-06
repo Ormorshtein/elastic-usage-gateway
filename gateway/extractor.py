@@ -21,6 +21,29 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+# --- Lookback parsing for time-range queries ---
+
+_LOOKBACK_RE = re.compile(r"^now-(\d+)([smhdw])$")
+_TIME_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+@dataclass
+class LookbackInfo:
+    """Extracted time-range lookback from a query (e.g., now-24h → 86400s)."""
+    seconds: float
+    field: str
+
+
+def _parse_lookback_seconds(value) -> float | None:
+    """Parse 'now-Xh' style values to seconds. Returns None if not parseable."""
+    if not isinstance(value, str):
+        return None
+    m = _LOOKBACK_RE.match(value.strip())
+    if not m:
+        return None
+    return int(m.group(1)) * _TIME_UNITS[m.group(2)]
+
+
 # ES internal fields we never report as user fields
 _INTERNAL_FIELDS = {"_score", "_doc", "_id", "_index", "_type", "_source", "_version"}
 
@@ -55,6 +78,7 @@ class FieldRefs:
     sorted: set[str] = field(default_factory=set)
     sourced: set[str] = field(default_factory=set)
     written: set[str] = field(default_factory=set)
+    lookback: LookbackInfo | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -79,7 +103,12 @@ def _is_user_field(name: str) -> bool:
     return name not in _INTERNAL_FIELDS and not name.startswith("_")
 
 
-def _extract_query_fields(query: dict, refs: FieldRefs, context: str = "queried") -> None:
+def _extract_query_fields(
+    query: dict,
+    refs: FieldRefs,
+    context: str = "queried",
+    lookbacks: list[LookbackInfo] | None = None,
+) -> None:
     """
     Recursively extract field names from a query clause.
 
@@ -87,6 +116,7 @@ def _extract_query_fields(query: dict, refs: FieldRefs, context: str = "queried"
         query: The query dict to walk.
         refs: FieldRefs to populate.
         context: "queried" or "filtered" — determines which set fields go into.
+        lookbacks: Accumulator for time-range lookback candidates.
     """
     if not isinstance(query, dict):
         return
@@ -99,23 +129,23 @@ def _extract_query_fields(query: dict, refs: FieldRefs, context: str = "queried"
                 clauses = value.get(clause_type)
                 if isinstance(clauses, list):
                     for clause in clauses:
-                        _extract_query_fields(clause, refs, context)
+                        _extract_query_fields(clause, refs, context, lookbacks)
                 elif isinstance(clauses, dict):
-                    _extract_query_fields(clauses, refs, context)
+                    _extract_query_fields(clauses, refs, context, lookbacks)
             # filter clause → fields go to "filtered" context
             filter_clauses = value.get("filter")
             if isinstance(filter_clauses, list):
                 for clause in filter_clauses:
-                    _extract_query_fields(clause, refs, "filtered")
+                    _extract_query_fields(clause, refs, "filtered", lookbacks)
             elif isinstance(filter_clauses, dict):
-                _extract_query_fields(filter_clauses, refs, "filtered")
+                _extract_query_fields(filter_clauses, refs, "filtered", lookbacks)
             continue
 
         # Nested query
         if key == "nested" and isinstance(value, dict):
             nested_query = value.get("query")
             if nested_query:
-                _extract_query_fields(nested_query, refs, context)
+                _extract_query_fields(nested_query, refs, context, lookbacks)
             continue
 
         # Resolve target set based on context
@@ -123,9 +153,16 @@ def _extract_query_fields(query: dict, refs: FieldRefs, context: str = "queried"
 
         # Leaf query types — the key under them is the field name
         if key in _LEAF_QUERY_TYPES and isinstance(value, dict):
-            for field_name in value:
+            for field_name, field_body in value.items():
                 if _is_user_field(field_name):
                     target.add(field_name)
+                # Extract lookback from range queries
+                if key == "range" and lookbacks is not None and isinstance(field_body, dict):
+                    for bound_key in ("gte", "gt"):
+                        lb = _parse_lookback_seconds(field_body.get(bound_key))
+                        if lb is not None:
+                            lookbacks.append(LookbackInfo(seconds=lb, field=field_name))
+                            break
             continue
 
         # exists has a "field" key
@@ -204,15 +241,16 @@ def _extract_source_fields(source, target: set[str]) -> None:
 def extract_fields_from_search(body: dict) -> FieldRefs:
     """Extract field references from a _search request body."""
     refs = FieldRefs()
+    lookbacks: list[LookbackInfo] = []
 
     query = body.get("query")
     if query:
-        _extract_query_fields(query, refs, context="queried")
+        _extract_query_fields(query, refs, context="queried", lookbacks=lookbacks)
 
     # Post-filter is always filter context
     post_filter = body.get("post_filter")
     if post_filter:
-        _extract_query_fields(post_filter, refs, context="filtered")
+        _extract_query_fields(post_filter, refs, context="filtered", lookbacks=lookbacks)
 
     for agg_key in ("aggs", "aggregations"):
         aggs = body.get(agg_key)
@@ -226,6 +264,10 @@ def extract_fields_from_search(body: dict) -> FieldRefs:
     source = body.get("_source")
     if source is not None:
         _extract_source_fields(source, refs.sourced)
+
+    # Pick widest lookback window
+    if lookbacks:
+        refs.lookback = max(lookbacks, key=lambda lb: lb.seconds)
 
     return refs
 

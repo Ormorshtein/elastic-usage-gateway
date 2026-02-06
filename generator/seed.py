@@ -1,14 +1,14 @@
 """
 Seed script — creates indices with explicit mappings and loads sample documents.
 
-Supports three indices:
-  - products (100 docs) — e-commerce product catalog
-  - logs (500 docs) — application log entries
-  - orders (200 docs) — order analytics data
+Supports three logical index groups:
+  - products (100 docs) — single index, e-commerce product catalog
+  - logs (500 docs) — 3 daily indices behind "logs" alias
+  - orders (200 docs) — 2 regional indices behind "orders" alias
 
 Usage:
     python -m generator.seed                     # seed all indices
-    python -m generator.seed --index logs orders  # seed specific indices
+    python -m generator.seed --index logs orders  # seed specific groups
     python -m generator.seed --gateway           # seed through the gateway (port 9201)
 """
 
@@ -23,7 +23,7 @@ from config import ES_HOST, GATEWAY_PORT
 
 
 # ============================================================
-# Products index (100 docs)
+# Products index (100 docs) — single index, no alias
 # ============================================================
 
 PRODUCTS_MAPPING = {
@@ -107,7 +107,7 @@ def generate_product(doc_id: int) -> dict:
 
 
 # ============================================================
-# Logs index (500 docs)
+# Logs index (500 docs total) — 3 daily indices behind "logs" alias
 # ============================================================
 
 LOGS_MAPPING = {
@@ -170,12 +170,17 @@ LOG_MESSAGES = {
 }
 
 
-def generate_log_entry(doc_id: int) -> dict:
+def generate_log_entry(doc_id: int, target_date: datetime | None = None) -> dict:
     level = random.choices(LOG_LEVELS, weights=LOG_LEVEL_WEIGHTS, k=1)[0]
     service = random.choice(LOG_SERVICES)
-    now = datetime.utcnow()
-    # Spread logs over the last 48 hours
-    ts = now - timedelta(seconds=random.randint(0, 48 * 3600))
+
+    if target_date:
+        # Spread within that day (0-24 hours)
+        ts = target_date + timedelta(seconds=random.randint(0, 86399))
+    else:
+        now = datetime.utcnow()
+        ts = now - timedelta(seconds=random.randint(0, 48 * 3600))
+
     status = 200
     if level == "ERROR":
         status = random.choice([500, 502, 503, 504, 400, 401, 403])
@@ -199,7 +204,7 @@ def generate_log_entry(doc_id: int) -> dict:
 
 
 # ============================================================
-# Orders index (200 docs)
+# Orders index (200 docs total) — 2 regional indices behind "orders" alias
 # ============================================================
 
 ORDERS_MAPPING = {
@@ -226,19 +231,21 @@ ORDERS_MAPPING = {
 ORDER_STATUSES = ["pending", "confirmed", "shipped", "delivered", "cancelled", "returned"]
 ORDER_STATUS_WEIGHTS = [10, 20, 25, 30, 10, 5]
 PAYMENT_METHODS = ["credit_card", "debit_card", "paypal", "bank_transfer", "crypto"]
-SHIPPING_COUNTRIES = ["US", "UK", "DE", "FR", "JP", "CA", "AU", "BR", "IN", "KR"]
+US_COUNTRIES = ["US", "CA", "MX"]
+EU_COUNTRIES = ["UK", "DE", "FR", "IT", "ES", "NL"]
 ORDER_CATEGORIES = ["electronics", "clothing", "home", "sports", "books", "food", "toys"]
 ORDER_CHANNELS = ["web", "mobile", "api", "in-store"]
 FIRST_NAMES = ["Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry", "Iris", "Jack"]
 LAST_NAMES = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Wilson", "Moore"]
 
 
-def generate_order(doc_id: int) -> dict:
+def generate_order(doc_id: int, region: str = "us") -> dict:
     now = datetime.utcnow()
     order_date = now - timedelta(days=random.randint(0, 90))
     status = random.choices(ORDER_STATUSES, weights=ORDER_STATUS_WEIGHTS, k=1)[0]
     first = random.choice(FIRST_NAMES)
     last = random.choice(LAST_NAMES)
+    countries = US_COUNTRIES if region == "us" else EU_COUNTRIES
 
     return {
         "order_id": f"ORD-{doc_id:05d}",
@@ -249,7 +256,7 @@ def generate_order(doc_id: int) -> dict:
         "total_amount": round(random.uniform(5.0, 2000.0), 2),
         "item_count": random.randint(1, 15),
         "payment_method": random.choice(PAYMENT_METHODS),
-        "shipping_country": random.choice(SHIPPING_COUNTRIES),
+        "shipping_country": random.choice(countries),
         "category": random.choice(ORDER_CATEGORIES),
         "channel": random.choice(ORDER_CHANNELS),
         "internal_notes": f"Processed by batch-{random.randint(1, 50)}" if random.random() < 0.3 else "",
@@ -258,34 +265,71 @@ def generate_order(doc_id: int) -> dict:
 
 
 # ============================================================
-# Generic seeding functions
+# Index group configurations
 # ============================================================
+
+# Each group can have:
+#   - "mapping": the ES mapping for all concrete indices
+#   - "concrete_indices": list of {name, count, generator_kwargs} dicts
+#   - "alias": optional alias name to create after seeding
+#
+# If no "concrete_indices", it's a single index (backwards compatible).
 
 INDEX_CONFIGS = {
     "products": {
         "mapping": PRODUCTS_MAPPING,
-        "count": 100,
-        "generator": generate_product,
+        "concrete_indices": [
+            {"name": "products", "count": 100, "generator": generate_product, "kwargs": {}},
+        ],
+        # No alias — single index
     },
     "logs": {
         "mapping": LOGS_MAPPING,
-        "count": 500,
-        "generator": generate_log_entry,
+        "alias": "logs",
+        "concrete_indices": [
+            {
+                "name": "logs-2026.02.04", "count": 200,
+                "generator": generate_log_entry,
+                "kwargs": {"target_date": datetime(2026, 2, 4)},
+            },
+            {
+                "name": "logs-2026.02.05", "count": 200,
+                "generator": generate_log_entry,
+                "kwargs": {"target_date": datetime(2026, 2, 5)},
+            },
+            {
+                "name": "logs-2026.02.06", "count": 100,
+                "generator": generate_log_entry,
+                "kwargs": {"target_date": datetime(2026, 2, 6)},
+            },
+        ],
     },
     "orders": {
         "mapping": ORDERS_MAPPING,
-        "count": 200,
-        "generator": generate_order,
+        "alias": "orders",
+        "concrete_indices": [
+            {
+                "name": "orders-us", "count": 120,
+                "generator": generate_order,
+                "kwargs": {"region": "us"},
+            },
+            {
+                "name": "orders-eu", "count": 80,
+                "generator": generate_order,
+                "kwargs": {"region": "eu"},
+            },
+        ],
     },
 }
 
 
-def seed_index(base_url: str, index_name: str, config: dict) -> None:
-    """Create an index and load sample documents."""
-    mapping = config["mapping"]
-    count = config["count"]
-    generator = config["generator"]
+# ============================================================
+# Generic seeding functions
+# ============================================================
 
+def seed_concrete_index(base_url: str, index_name: str, mapping: dict,
+                        count: int, generator, kwargs: dict) -> None:
+    """Create a single concrete index and load documents."""
     # Delete if exists
     requests.delete(f"{base_url}/{index_name}")
 
@@ -295,13 +339,13 @@ def seed_index(base_url: str, index_name: str, config: dict) -> None:
         json=mapping,
         headers={"Content-Type": "application/json"},
     )
-    print(f"  Create {index_name}: {resp.status_code} — {resp.json().get('acknowledged', resp.text[:100])}")
+    print(f"    Create {index_name}: {resp.status_code} — {resp.json().get('acknowledged', resp.text[:100])}")
 
     # Bulk index
     bulk_lines = []
     for i in range(1, count + 1):
         action = json.dumps({"index": {"_index": index_name, "_id": str(i)}})
-        doc = json.dumps(generator(i))
+        doc = json.dumps(generator(i, **kwargs))
         bulk_lines.append(action)
         bulk_lines.append(doc)
 
@@ -314,21 +358,59 @@ def seed_index(base_url: str, index_name: str, config: dict) -> None:
     )
     result = resp.json()
     errors = result.get("errors", False)
-    print(f"  Bulk index: {count} docs, errors={errors}")
+    print(f"    Bulk index: {count} docs, errors={errors}")
 
     requests.post(f"{base_url}/{index_name}/_refresh")
-    print(f"  {index_name} refreshed.")
 
 
-def seed(base_url: str, indices: list[str] | None = None) -> None:
-    """Seed specified indices (or all if None)."""
-    targets = indices or list(INDEX_CONFIGS.keys())
+def seed_group(base_url: str, group_name: str, config: dict) -> None:
+    """Seed an index group (possibly multiple concrete indices with an alias)."""
+    print(f"\nSeeding {group_name}...")
+    mapping = config["mapping"]
+    alias = config.get("alias")
+
+    # Delete alias first if it exists (to avoid conflicts)
+    if alias:
+        requests.delete(f"{base_url}/{alias}")
+
+    for ci in config["concrete_indices"]:
+        seed_concrete_index(
+            base_url=base_url,
+            index_name=ci["name"],
+            mapping=mapping,
+            count=ci["count"],
+            generator=ci["generator"],
+            kwargs=ci.get("kwargs", {}),
+        )
+
+    # Create alias pointing to all concrete indices
+    if alias:
+        index_names = [ci["name"] for ci in config["concrete_indices"]]
+        actions = [
+            {"add": {"index": name, "alias": alias}}
+            for name in index_names
+        ]
+        resp = requests.post(
+            f"{base_url}/_aliases",
+            json={"actions": actions},
+            headers={"Content-Type": "application/json"},
+        )
+        if resp.status_code == 200:
+            print(f"  Created alias '{alias}' -> {index_names}")
+        else:
+            print(f"  WARNING: alias creation failed: {resp.status_code} {resp.text[:200]}")
+
+    print(f"  {group_name} seeded.")
+
+
+def seed(base_url: str, groups: list[str] | None = None) -> None:
+    """Seed specified groups (or all if None)."""
+    targets = groups or list(INDEX_CONFIGS.keys())
     for name in targets:
         if name not in INDEX_CONFIGS:
-            print(f"  Unknown index: {name}, skipping")
+            print(f"  Unknown group: {name}, skipping")
             continue
-        print(f"\nSeeding {name}...")
-        seed_index(base_url, name, INDEX_CONFIGS[name])
+        seed_group(base_url, name, INDEX_CONFIGS[name])
 
     print("\nSeeding complete.")
 
@@ -336,7 +418,7 @@ def seed(base_url: str, indices: list[str] | None = None) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Seed Elasticsearch indices")
     parser.add_argument("--gateway", action="store_true", help="Send through gateway (port 9201)")
-    parser.add_argument("--index", nargs="*", help="Specific indices to seed (default: all)")
+    parser.add_argument("--index", nargs="*", help="Specific index groups to seed (default: all)")
     args = parser.parse_args()
 
     if args.gateway:
