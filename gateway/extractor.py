@@ -27,7 +27,7 @@ _INTERNAL_FIELDS = {"_score", "_doc", "_id", "_index", "_type", "_source", "_ver
 # Leaf query types where the key under them is a field name
 _LEAF_QUERY_TYPES = {
     "match", "match_phrase", "match_phrase_prefix",
-    "term", "terms", "range", "exists",
+    "term", "terms", "range",
     "wildcard", "prefix", "fuzzy", "regexp",
 }
 
