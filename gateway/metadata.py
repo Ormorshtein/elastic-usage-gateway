@@ -13,6 +13,7 @@ import logging
 import httpx
 
 from config import ES_HOST, EVENT_TIMEOUT, METADATA_REFRESH_INTERVAL
+from gateway import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ async def refresh() -> None:
     _index_to_group = new_lookup
     _groups = new_groups
 
+    metrics.inc("metadata_refresh_ok")
     logger.info(
         "Metadata refreshed: %d concrete indices → %d groups",
         len(new_lookup), len(new_groups),
@@ -126,6 +128,7 @@ async def _refresh_loop() -> None:
             await refresh()
         except Exception:
             logger.exception("Metadata refresh failed")
+            metrics.inc("metadata_refresh_failed")
         await asyncio.sleep(METADATA_REFRESH_INTERVAL)
 
 
@@ -134,3 +137,8 @@ def start_refresh_loop() -> None:
     loop = asyncio.get_running_loop()
     loop.create_task(_refresh_loop())
     logger.info("Metadata refresh loop started (interval=%ds)", METADATA_REFRESH_INTERVAL)
+
+
+async def close_metadata_client() -> None:
+    """Close the metadata client. Called during gateway shutdown."""
+    await _client.aclose()

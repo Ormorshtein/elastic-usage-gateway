@@ -264,3 +264,8 @@ async def compute_heat(time_window_hours: float = 24.0,
         },
         "groups": groups,
     }
+
+
+async def close_analyzer_client() -> None:
+    """Close the analyzer client. Called during gateway shutdown."""
+    await _client.aclose()

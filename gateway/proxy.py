@@ -91,3 +91,8 @@ async def proxy_request(request: Request) -> tuple[Response, dict]:
     )
 
     return response, metadata
+
+
+async def close_proxy_client() -> None:
+    """Close the proxy client. Called during gateway shutdown."""
+    await _client.aclose()

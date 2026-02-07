@@ -1,6 +1,10 @@
 """
 Control panel UI — single HTML page with inline CSS/JS.
 Served at /_gateway/ui by the gateway.
+
+Two tabs:
+  - Generator: scenario selection, weight sliders, traffic generation controls
+  - Monitor: live health/stats, query body config, heat report links
 """
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -14,17 +18,31 @@ HTML_PAGE = """<!DOCTYPE html>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
          background: #0f1117; color: #e0e0e0; padding: 24px; }
   h1 { font-size: 22px; margin-bottom: 4px; color: #fff; }
-  .subtitle { color: #888; font-size: 13px; margin-bottom: 24px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 20px; }
+
+  /* Main navigation tabs */
+  .main-tabs { display: flex; gap: 0; margin-bottom: 24px; border-bottom: 2px solid #2a2d37; }
+  .main-tab { padding: 12px 24px; font-size: 14px; font-weight: 600; cursor: pointer;
+              color: #888; border-bottom: 2px solid transparent; margin-bottom: -2px;
+              transition: all .15s; user-select: none; }
+  .main-tab:hover { color: #ccc; }
+  .main-tab.active { color: #4f8ff7; border-bottom-color: #4f8ff7; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
   .card { background: #1a1d27; border: 1px solid #2a2d37; border-radius: 8px;
           padding: 20px; margin-bottom: 16px; }
   .card h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px;
              color: #888; margin-bottom: 16px; }
+
+  /* Scenario tabs */
   .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
   .tab { padding: 8px 16px; border-radius: 6px; border: 1px solid #3a3d47;
          background: #0f1117; color: #888; font-size: 13px; font-weight: 600;
          cursor: pointer; transition: all .15s; }
   .tab:hover { border-color: #4f8ff7; color: #ccc; }
   .tab.active { background: #1e2a3a; border-color: #4f8ff7; color: #4f8ff7; }
+
   .slider-row { display: flex; align-items: center; margin-bottom: 10px; gap: 12px; }
   .slider-label { width: 220px; font-size: 13px; color: #ccc; }
   .slider-row input[type=range] { flex: 1; accent-color: #4f8ff7; }
@@ -48,22 +66,57 @@ HTML_PAGE = """<!DOCTYPE html>
   .status.info { display: block; background: #1e2a3a; border: 1px solid #2a4a6a; color: #7ab8f5; }
   .status.ok { display: block; background: #1a2e1a; border: 1px solid #2a5a2a; color: #6fcf6f; }
   .status.err { display: block; background: #2e1a1a; border: 1px solid #5a2a2a; color: #cf6f6f; }
-  .links { display: flex; gap: 16px; flex-wrap: wrap; }
-  .links a { color: #4f8ff7; text-decoration: none; font-size: 13px; padding: 8px 14px;
-             background: #1e2a3a; border-radius: 6px; border: 1px solid #2a4a6a; }
-  .links a:hover { background: #2a3a5a; }
   .progress { margin-top: 8px; height: 4px; background: #2a2d37; border-radius: 2px;
               overflow: hidden; display: none; }
   .progress.active { display: block; }
   .progress-bar { height: 100%; background: #4f8ff7; transition: width .3s;
                   animation: pulse 1.5s ease-in-out infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+  /* Monitor tab styles */
+  .health-banner { padding: 12px 16px; border-radius: 6px; font-size: 14px;
+                   font-weight: 600; margin-bottom: 16px; display: flex;
+                   align-items: center; gap: 10px; }
+  .health-banner.healthy { background: #1a2e1a; border: 1px solid #2a5a2a; color: #6fcf6f; }
+  .health-banner.unhealthy { background: #2e1a1a; border: 1px solid #5a2a2a; color: #cf6f6f; }
+  .health-banner.loading { background: #1e2a3a; border: 1px solid #2a4a6a; color: #7ab8f5; }
+  .health-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .healthy .health-dot { background: #6fcf6f; }
+  .unhealthy .health-dot { background: #cf6f6f; }
+  .loading .health-dot { background: #7ab8f5; }
+
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                gap: 12px; }
+  .stat-box { background: #0f1117; border: 1px solid #2a2d37; border-radius: 6px;
+              padding: 12px 16px; }
+  .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+                color: #888; margin-bottom: 4px; }
+  .stat-value { font-size: 22px; font-weight: 700; color: #fff;
+                font-variant-numeric: tabular-nums; }
+  .stat-value.warn { color: #f0ad4e; }
+  .stat-value.err { color: #cf6f6f; }
+
+  .links { display: flex; gap: 16px; flex-wrap: wrap; }
+  .links a { color: #4f8ff7; text-decoration: none; font-size: 13px; padding: 8px 14px;
+             background: #1e2a3a; border-radius: 6px; border: 1px solid #2a4a6a; }
+  .links a:hover { background: #2a3a5a; }
+
+  .refresh-hint { font-size: 11px; color: #555; margin-top: 8px; }
 </style>
 </head>
 <body>
 
 <h1>ES Usage Gateway</h1>
-<p class="subtitle">Control Panel &mdash; generate traffic, observe heat</p>
+<p class="subtitle">Control Panel</p>
+
+<!-- Main navigation -->
+<div class="main-tabs">
+  <div class="main-tab active" onclick="switchMainTab('generator')">Generator</div>
+  <div class="main-tab" onclick="switchMainTab('monitor')">Monitor</div>
+</div>
+
+<!-- ==================== GENERATOR TAB ==================== -->
+<div class="tab-content active" id="tab-generator">
 
 <div class="card">
   <h2>Scenario</h2>
@@ -86,11 +139,42 @@ HTML_PAGE = """<!DOCTYPE html>
   <div class="actions">
     <button class="btn-run" id="btn-run" onclick="runScenario()">Run Scenario</button>
     <button class="btn-run-all" id="btn-run-all" onclick="runAllScenarios()">Run All Scenarios</button>
-    <button class="btn-clear" id="btn-clear" onclick="clearStats()">Clear Stats</button>
+    <button class="btn-clear" id="btn-clear" onclick="clearEvents()">Clear Events</button>
     <button class="btn-reset" onclick="resetWeights()">Reset Weights</button>
   </div>
   <div class="progress" id="progress"><div class="progress-bar" style="width:100%"></div></div>
   <div class="status" id="status"></div>
+</div>
+
+</div>
+
+<!-- ==================== MONITOR TAB ==================== -->
+<div class="tab-content" id="tab-monitor">
+
+<div id="health-banner" class="health-banner loading">
+  <div class="health-dot"></div>
+  <span id="health-text">Checking...</span>
+</div>
+
+<div class="card">
+  <h2>Gateway Stats</h2>
+  <div class="stats-grid" id="stats-grid">
+    <div class="stat-box"><div class="stat-label">Requests proxied</div><div class="stat-value" id="st-requests-proxied">-</div></div>
+    <div class="stat-box"><div class="stat-label">Requests failed</div><div class="stat-value" id="st-requests-failed">-</div></div>
+    <div class="stat-box"><div class="stat-label">Events emitted</div><div class="stat-value" id="st-events-emitted">-</div></div>
+    <div class="stat-box"><div class="stat-label">Events failed</div><div class="stat-value" id="st-events-failed">-</div></div>
+    <div class="stat-box"><div class="stat-label">Events skipped</div><div class="stat-value" id="st-events-skipped">-</div></div>
+    <div class="stat-box"><div class="stat-label">Extraction errors</div><div class="stat-value" id="st-extraction-errors">-</div></div>
+    <div class="stat-box"><div class="stat-label">Metadata refreshes</div><div class="stat-value" id="st-metadata-refresh-ok">-</div></div>
+    <div class="stat-box"><div class="stat-label">Metadata failures</div><div class="stat-value" id="st-metadata-refresh-failed">-</div></div>
+    <div class="stat-box"><div class="stat-label">ES avg response</div><div class="stat-value" id="st-es-time-avg">-</div></div>
+    <div class="stat-box"><div class="stat-label">ES max response</div><div class="stat-value" id="st-es-time-max">-</div></div>
+    <div class="stat-box"><div class="stat-label">Avg request time</div><div class="stat-value" id="st-request-time-avg">-</div></div>
+    <div class="stat-box"><div class="stat-label">Max request time</div><div class="stat-value" id="st-request-time-max">-</div></div>
+    <div class="stat-box"><div class="stat-label">Uptime</div><div class="stat-value" id="st-uptime">-</div></div>
+    <div class="stat-box"><div class="stat-label">Index groups</div><div class="stat-value" id="st-groups">-</div></div>
+  </div>
+  <div class="refresh-hint">Auto-refreshes every 5 seconds</div>
 </div>
 
 <div class="card">
@@ -111,15 +195,31 @@ HTML_PAGE = """<!DOCTYPE html>
 <div class="card">
   <h2>Links</h2>
   <div class="links">
-    <a href="http://localhost:5601/app/dashboards#/view/usage-heat" target="_blank">Usage &amp; Heat Dashboard</a>
     <a href="/_gateway/heat" target="_blank">Heat Report (JSON)</a>
+    <a href="/_gateway/stats" target="_blank">Stats (JSON)</a>
+    <a href="/_gateway/health" target="_blank">Health (JSON)</a>
     <a href="/_gateway/sample-events?count=10" target="_blank">Sample Events</a>
     <a href="/_gateway/scenarios" target="_blank">Scenarios (JSON)</a>
-    <a href="http://localhost:5601/app/discover" target="_blank">Discover (raw events)</a>
   </div>
 </div>
 
+</div>
+
 <script>
+/* ==================== MAIN TAB SWITCHING ==================== */
+
+function switchMainTab(tab) {
+  document.querySelectorAll('.main-tab').forEach((el, i) => {
+    el.classList.toggle('active', el.textContent.toLowerCase() === tab);
+  });
+  document.querySelectorAll('.tab-content').forEach(el => {
+    el.classList.toggle('active', el.id === 'tab-' + tab);
+  });
+  if (tab === 'monitor') refreshStats();
+}
+
+/* ==================== GENERATOR TAB ==================== */
+
 let scenarios = {};
 let activeScenario = 'products';
 
@@ -149,7 +249,7 @@ function buildTabs() {
 
 function switchScenario(key) {
   activeScenario = key;
-  document.querySelectorAll('.tab').forEach(t => {
+  document.querySelectorAll('#scenario-tabs .tab').forEach(t => {
     t.className = 'tab' + (t.dataset.scenario === key ? ' active' : '');
   });
   buildSliders();
@@ -331,7 +431,7 @@ async function runAllScenarios() {
   setButtonsDisabled(false);
 }
 
-async function clearStats() {
+async function clearEvents() {
   if (!confirm('Delete all usage events? This cannot be undone.')) return;
   const btn = document.getElementById('btn-clear');
   btn.disabled = true;
@@ -348,6 +448,70 @@ async function clearStats() {
     setStatus('Network error: ' + e.message, 'err');
   }
   btn.disabled = false;
+}
+
+/* ==================== MONITOR TAB ==================== */
+
+function formatUptime(seconds) {
+  if (seconds < 60) return Math.round(seconds) + 's';
+  if (seconds < 3600) return Math.round(seconds / 60) + 'm';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.round((seconds % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+async function refreshStats() {
+  // Fetch health
+  try {
+    const resp = await fetch('/_gateway/health');
+    const data = await resp.json();
+    const banner = document.getElementById('health-banner');
+    const text = document.getElementById('health-text');
+    if (data.status === 'healthy') {
+      banner.className = 'health-banner healthy';
+      text.textContent = 'Elasticsearch reachable — Gateway healthy';
+    } else {
+      banner.className = 'health-banner unhealthy';
+      text.textContent = 'Elasticsearch: ' + (data.elasticsearch || 'unreachable');
+    }
+  } catch (e) {
+    const banner = document.getElementById('health-banner');
+    const text = document.getElementById('health-text');
+    banner.className = 'health-banner unhealthy';
+    text.textContent = 'Gateway unreachable: ' + e.message;
+  }
+
+  // Fetch stats
+  try {
+    const resp = await fetch('/_gateway/stats');
+    const data = await resp.json();
+
+    const set = (id, val, warnIf) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = typeof val === 'number' ? val.toLocaleString() : val;
+      el.className = 'stat-value';
+      if (warnIf && val > 0) el.className = 'stat-value ' + (val > 10 ? 'err' : 'warn');
+    };
+
+    set('st-requests-proxied', data.requests_proxied || 0);
+    set('st-requests-failed', data.requests_failed || 0, true);
+    set('st-events-emitted', data.events_emitted || 0);
+    set('st-events-failed', data.events_failed || 0, true);
+    set('st-events-skipped', data.events_skipped || 0);
+    set('st-extraction-errors', data.extraction_errors || 0, true);
+    set('st-metadata-refresh-ok', data.metadata_refresh_ok || 0);
+    set('st-metadata-refresh-failed', data.metadata_refresh_failed || 0, true);
+    set('st-es-time-avg', (data.es_time_avg_ms || 0) + 'ms');
+    set('st-es-time-max', (data.es_time_max_ms || 0) + 'ms');
+    set('st-request-time-avg', (data.request_time_avg_ms || 0) + 'ms');
+    set('st-request-time-max', (data.request_time_max_ms || 0) + 'ms');
+    set('st-uptime', formatUptime(data.uptime_seconds || 0));
+    const groups = data.metadata_cache ? data.metadata_cache.groups : '-';
+    set('st-groups', groups);
+  } catch (e) {
+    console.warn('Failed to fetch stats:', e);
+  }
 }
 
 async function loadQBConfig() {
@@ -382,8 +546,14 @@ function updateQBConfig() {
   }, 300);
 }
 
+/* ==================== INIT ==================== */
+
 loadScenarios();
 loadQBConfig();
+refreshStats();
+
+// Auto-refresh stats every 5 seconds
+setInterval(refreshStats, 5000);
 </script>
 </body>
 </html>

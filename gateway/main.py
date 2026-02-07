@@ -10,7 +10,8 @@ Routes:
   /_gateway/groups         — index groups with concrete indices (GET)
   /_gateway/sample-events  — recent usage events (GET), ?index_group= filter
   /_gateway/config         — query body storage config (GET/PATCH)
-  /_gateway/health         — gateway health check (GET)
+  /_gateway/health         — gateway health check with ES connectivity (GET)
+  /_gateway/stats          — internal counters for monitoring (GET)
   /{path:path}             — everything else proxied to Elasticsearch
 """
 
@@ -26,12 +27,14 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 
 from config import GATEWAY_HOST, GATEWAY_PORT, ES_HOST, USAGE_INDEX
-from gateway.proxy import proxy_request
+from gateway.proxy import proxy_request, close_proxy_client
 from gateway.extractor import extract_from_request
 from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, get_query_body_config, set_query_body_config, close_event_client
-from gateway.analyzer import compute_heat
+from gateway.analyzer import compute_heat, close_analyzer_client
 from gateway.ui import HTML_PAGE
 from gateway import metadata as metadata_mod
+from gateway.metadata import close_metadata_client
+from gateway import metrics
 import random
 from generator.queries import SCENARIOS
 
@@ -98,22 +101,71 @@ def _should_skip_event(operation: str, indices: list[str] | None) -> bool:
 async def lifespan(app: FastAPI):
     """Create usage-events index on startup and start metadata refresh."""
     logger.info("Gateway starting — ensuring usage index exists")
-    await ensure_usage_index()
+    try:
+        await ensure_usage_index()
+    except Exception:
+        logger.warning("Could not ensure usage index at startup — will retry on first event")
     metadata_mod.start_refresh_loop()
     logger.info("Gateway ready — proxying to Elasticsearch")
     yield
-    logger.info("Gateway shutting down")
+    logger.info("Gateway shutting down — closing clients")
     await close_event_client()
+    await close_proxy_client()
+    await close_analyzer_client()
+    await close_metadata_client()
 
 
 app = FastAPI(title="ES Usage Gateway", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def timing_middleware(request: Request, call_next):
+    """Measure total request time for proxied requests."""
+    start = time.perf_counter()
+    response = await call_next(request)
+    if not request.url.path.startswith("/_gateway/"):
+        ms = (time.perf_counter() - start) * 1000
+        metrics.observe_request_time(ms)
+    return response
 
 
 # --- Gateway-specific endpoints (not proxied) ---
 
 @app.get("/_gateway/health")
 async def health():
-    return {"status": "ok", "service": "es-usage-gateway"}
+    """Health check with ES connectivity probe."""
+    stats = metrics.get_all()
+    base = {
+        "service": "es-usage-gateway",
+        "uptime_seconds": stats["uptime_seconds"],
+        "events_emitted": stats["events_emitted"],
+        "events_failed": stats["events_failed"],
+    }
+    try:
+        async with httpx.AsyncClient(base_url=ES_HOST, timeout=2.0) as client:
+            resp = await client.head("/")
+        if resp.status_code < 500:
+            return {**base, "status": "healthy", "elasticsearch": "reachable"}
+        return JSONResponse(
+            content={**base, "status": "unhealthy", "elasticsearch": f"status {resp.status_code}"},
+            status_code=503,
+        )
+    except httpx.RequestError as exc:
+        return JSONResponse(
+            content={**base, "status": "unhealthy", "elasticsearch": str(exc)},
+            status_code=503,
+        )
+
+
+@app.get("/_gateway/stats")
+async def stats():
+    """Return internal counters and metadata cache info."""
+    return {
+        **metrics.get_all(),
+        "metadata_cache": {
+            "groups": len(metadata_mod.get_groups()),
+        },
+    }
 
 
 @app.get("/_gateway/config")
@@ -284,6 +336,7 @@ async def generate(req: GenerateRequest):
             concrete = _resolve_concrete_indices(resp.content, operation, indices)
             index_list = concrete or indices or [None]
             elapsed_ms = resp.elapsed.total_seconds() * 1000 if hasattr(resp, 'elapsed') else 0
+            metrics.observe_es_time(elapsed_ms)
             for idx_name in index_list:
                 group = metadata_mod.resolve_group(idx_name) if idx_name else None
                 event = build_event(
@@ -339,10 +392,14 @@ async def proxy_catchall(request: Request):
     """
     # Step 1: proxy
     response, metadata = await proxy_request(request)
+    metrics.inc("requests_proxied")
 
     if not metadata:
         # Proxy failed (502) — no metadata to extract
+        metrics.inc("requests_failed")
         return response
+
+    metrics.observe_es_time(metadata["elapsed_ms"])
 
     # Step 2: extract (safe — never raises)
     try:
@@ -353,10 +410,12 @@ async def proxy_catchall(request: Request):
         )
     except Exception:
         logger.exception("Extraction failed for %s — skipping event", metadata["path"])
+        metrics.inc("extraction_errors")
         return response
 
     # Skip events for internal operations (own usage index, ES system endpoints)
     if _should_skip_event(operation, indices):
+        metrics.inc("events_skipped")
         return response
 
     # Step 3+4: build and emit event(s) — one per index for multi-index queries
@@ -380,7 +439,6 @@ async def proxy_catchall(request: Request):
         )
         emit_event_background(event)
 
-    # Step 5: return response
     return response
 
 

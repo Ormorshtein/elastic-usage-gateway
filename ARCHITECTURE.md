@@ -120,12 +120,18 @@ Single-page HTML/JS control panel served at `/_gateway/ui`. Provides:
 - Lookback override for time-range queries.
 - Query body sampling configuration.
 
+### gateway/metrics.py — In-Memory Counters
+
+Simple module-level dict tracking request counts, event emission success/failure, extraction errors, and metadata refresh status. Counters reset on restart (acceptable for a dev tool). No external dependencies.
+
+Exposed via `/_gateway/stats` and included in `/_gateway/health` responses.
+
 ### gateway/main.py — Application Entry Point
 
 FastAPI application that wires everything together:
-- Lifespan hook: creates usage index, starts metadata refresh, shuts down clients.
-- Gateway endpoints (`/_gateway/*`): heat, groups, sample-events, config, generate, UI.
-- Catch-all proxy route: observation pipeline for all other traffic.
+- Lifespan hook: creates usage index, starts metadata refresh, shuts down all httpx clients.
+- Gateway endpoints (`/_gateway/*`): health, stats, heat, groups, sample-events, config, generate, UI.
+- Catch-all proxy route: observation pipeline for all other traffic with metrics instrumentation.
 
 ### generator/ — Traffic Generator
 
@@ -222,6 +228,7 @@ elastic_recommand/
     events.py            # Usage event model and emission
     analyzer.py          # Heat computation
     metadata.py          # Index metadata cache (alias/data stream)
+    metrics.py           # In-memory counters for monitoring
     ui.py                # Control panel HTML/JS
   generator/
     __init__.py
@@ -233,6 +240,7 @@ elastic_recommand/
     test_events.py       # Fingerprinting and event building tests
     test_extractor.py    # Path parsing, DSL extraction, bulk, msearch
     test_metadata.py     # Group resolution tests
+    test_metrics.py      # In-memory counter tests
     test_queries.py      # Query template and lookback tests
 ```
 

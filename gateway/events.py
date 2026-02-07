@@ -26,6 +26,7 @@ import httpx
 
 from config import ES_HOST, USAGE_INDEX, CLUSTER_ID, QUERY_BODY_ENABLED, QUERY_BODY_SAMPLE_RATE, EVENT_TIMEOUT
 from gateway.extractor import FieldRefs
+from gateway import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -181,8 +182,12 @@ async def emit_event(event: dict) -> None:
                 "Failed to emit usage event: %s %s",
                 resp.status_code, resp.text[:200]
             )
+            metrics.inc("events_failed")
+        else:
+            metrics.inc("events_emitted")
     except httpx.RequestError as exc:
         logger.warning("Failed to emit usage event: %s", exc)
+        metrics.inc("events_failed")
 
 
 def emit_event_background(event: dict) -> None:
