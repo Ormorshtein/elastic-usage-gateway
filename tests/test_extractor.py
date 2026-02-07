@@ -9,6 +9,7 @@ from gateway.extractor import (
     extract_fields_from_document,
     FieldRefs,
     _extract_from_bulk,
+    _extract_from_msearch,
 )
 
 
@@ -389,3 +390,88 @@ class TestLookbackExtraction:
         body = {"query": {"range": {"timestamp": {"gte": "2026-01-01"}}}}
         refs = extract_fields_from_search(body)
         assert refs.lookback is None
+
+    def test_range_with_lte(self):
+        body = {"query": {"range": {"timestamp": {"lte": "now-2h"}}}}
+        refs = extract_fields_from_search(body)
+        assert refs.lookback is not None
+        assert refs.lookback.seconds == 7200
+        assert refs.lookback.field == "timestamp"
+
+    def test_range_with_lt(self):
+        body = {"query": {"range": {"timestamp": {"lt": "now-12h"}}}}
+        refs = extract_fields_from_search(body)
+        assert refs.lookback is not None
+        assert refs.lookback.seconds == 43200
+
+
+# --- Bulk update with doc wrapper ---
+
+class TestBulkUpdateExtraction:
+    def test_update_with_doc_wrapper(self):
+        lines = [
+            '{"update": {"_index": "products", "_id": "1"}}',
+            '{"doc": {"title": "Updated Name", "price": 499}}',
+        ]
+        body = "\n".join(lines).encode()
+        refs = _extract_from_bulk(body, "products")
+        assert refs.written == {"title", "price"}
+
+    def test_update_with_upsert_wrapper(self):
+        lines = [
+            '{"update": {"_index": "products", "_id": "1"}}',
+            '{"doc": {"title": "Name"}, "upsert": {"title": "Name", "brand": "Acme"}}',
+        ]
+        body = "\n".join(lines).encode()
+        refs = _extract_from_bulk(body, "products")
+        assert "title" in refs.written
+        assert "brand" in refs.written
+
+    def test_mixed_index_and_update(self):
+        lines = [
+            '{"index": {"_index": "products"}}',
+            '{"title": "Laptop", "price": 999}',
+            '{"update": {"_index": "products", "_id": "2"}}',
+            '{"doc": {"brand": "Dell"}}',
+        ]
+        body = "\n".join(lines).encode()
+        refs = _extract_from_bulk(body, "products")
+        assert refs.written == {"title", "price", "brand"}
+
+
+# --- msearch extraction ---
+
+class TestMsearchExtraction:
+    def test_simple_msearch(self):
+        lines = [
+            '{"index": "products"}',
+            '{"query": {"match": {"title": "laptop"}}}',
+            '{"index": "logs"}',
+            '{"query": {"term": {"level": "ERROR"}}}',
+        ]
+        body = "\n".join(lines).encode()
+        refs = _extract_from_msearch(body)
+        assert refs.queried == {"title", "level"}
+
+    def test_msearch_with_aggs(self):
+        lines = [
+            '{"index": "products"}',
+            '{"size": 0, "aggs": {"by_brand": {"terms": {"field": "brand"}}}}',
+        ]
+        body = "\n".join(lines).encode()
+        refs = _extract_from_msearch(body)
+        assert refs.aggregated == {"brand"}
+
+    def test_msearch_empty_body(self):
+        refs = _extract_from_msearch(b"")
+        assert refs.all_fields == set()
+
+    def test_msearch_via_extract_from_request(self):
+        lines = [
+            '{"index": "products"}',
+            '{"query": {"match": {"title": "laptop"}}}',
+        ]
+        body = "\n".join(lines).encode()
+        indices, op, refs = extract_from_request("/_msearch", "POST", body)
+        assert op == "msearch"
+        assert refs.queried == {"title"}

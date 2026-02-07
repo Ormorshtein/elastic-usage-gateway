@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _LOOKBACK_RE = re.compile(r"^now-(\d+)([smhdw])$")
 _TIME_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+_BOOST_RE = re.compile(r"\^[\d.]+$")
 
 
 @dataclass
@@ -158,9 +159,9 @@ def _extract_query_fields(
             for field_name, field_body in value.items():
                 if _is_user_field(field_name):
                     target.add(field_name)
-                # Extract lookback from range queries
+                # Extract lookback from range queries (check all bound types)
                 if key == "range" and lookbacks is not None and isinstance(field_body, dict):
-                    for bound_key in ("gte", "gt"):
+                    for bound_key in ("gte", "gt", "lte", "lt"):
                         parsed = _parse_lookback(field_body.get(bound_key))
                         if parsed is not None:
                             secs, label = parsed
@@ -180,7 +181,7 @@ def _extract_query_fields(
             fields = value.get("fields", [])
             for f in fields:
                 # Strip boost suffix like "title^2"
-                clean = re.sub(r"\^[\d.]+$", "", f)
+                clean = _BOOST_RE.sub("", f)
                 if _is_user_field(clean):
                     target.add(clean)
             continue
@@ -340,13 +341,17 @@ def extract_from_request(
     refs = FieldRefs()
 
     # Map operation names to categories
-    if operation in ("search", "msearch", "count"):
+    if operation in ("search", "count"):
         try:
             parsed = json.loads(body) if body else {}
             if isinstance(parsed, dict):
                 refs = extract_fields_from_search(parsed)
         except (json.JSONDecodeError, UnicodeDecodeError):
             logger.debug("Could not parse body as JSON for %s", path)
+
+    elif operation == "msearch":
+        # msearch uses NDJSON: alternating header/query lines
+        refs = _extract_from_msearch(body)
 
     elif operation == "doc" and method.upper() in ("PUT", "POST"):
         try:
@@ -365,10 +370,18 @@ def extract_from_request(
 
 def _extract_from_bulk(body: bytes, default_index: str | None) -> FieldRefs:
     """
-    Extract field references from a _bulk request body (ndjson).
+    Extract field references from a _bulk request body (NDJSON).
 
-    Bulk format: alternating action/metadata lines and document lines.
-    We extract written fields from the document lines of index/create/update actions.
+    Bulk format is alternating lines:
+      Line 1: action/metadata  {"index": {"_index": "products", "_id": "1"}}
+      Line 2: document body    {"title": "Laptop", "price": 999}
+      Line 3: action/metadata  {"delete": {"_index": "products", "_id": "2"}}
+      (no body for delete)
+      Line 4: action/metadata  {"update": {"_index": "products", "_id": "3"}}
+      Line 5: update body      {"doc": {"title": "Updated Name"}}
+
+    For update actions, the actual document fields are nested inside "doc"
+    or "upsert" wrappers — we unwrap those before extracting fields.
     """
     refs = FieldRefs()
     if not body:
@@ -381,6 +394,7 @@ def _extract_from_bulk(body: bytes, default_index: str | None) -> FieldRefs:
 
     i = 0
     while i < len(lines):
+        # Parse the action/metadata line
         try:
             action_line = json.loads(lines[i])
         except json.JSONDecodeError:
@@ -390,7 +404,7 @@ def _extract_from_bulk(body: bytes, default_index: str | None) -> FieldRefs:
         # Action is one of: index, create, update, delete
         action_type = next(iter(action_line), None)
         if action_type == "delete":
-            # Delete has no document body
+            # Delete has no document body — skip to next action
             i += 1
             continue
 
@@ -400,12 +414,67 @@ def _extract_from_bulk(body: bytes, default_index: str | None) -> FieldRefs:
             try:
                 doc = json.loads(lines[i])
                 if isinstance(doc, dict):
-                    for key in doc:
-                        if _is_user_field(key):
-                            refs.written.add(key)
+                    if action_type == "update":
+                        # Update wraps fields in {"doc": {...}} or {"upsert": {...}}
+                        for wrapper_key in ("doc", "upsert"):
+                            inner = doc.get(wrapper_key)
+                            if isinstance(inner, dict):
+                                for key in inner:
+                                    if _is_user_field(key):
+                                        refs.written.add(key)
+                    else:
+                        # index/create: fields are top-level
+                        for key in doc:
+                            if _is_user_field(key):
+                                refs.written.add(key)
             except json.JSONDecodeError:
                 pass
 
         i += 1
+
+    return refs
+
+
+def _extract_from_msearch(body: bytes) -> FieldRefs:
+    """
+    Extract field references from a _msearch request body (NDJSON).
+
+    msearch format is alternating lines:
+      Line 1: header  {"index": "products"}
+      Line 2: query   {"query": {"match": {"title": "laptop"}}}
+      Line 3: header  {"index": "logs"}
+      Line 4: query   {"query": {"term": {"level": "ERROR"}}}
+
+    We parse each query line as a search body and merge all field refs.
+    """
+    refs = FieldRefs()
+    if not body:
+        return refs
+
+    try:
+        lines = body.decode("utf-8").strip().split("\n")
+    except UnicodeDecodeError:
+        return refs
+
+    # Process query lines (odd-indexed: 1, 3, 5, ...)
+    for i in range(1, len(lines), 2):
+        line = lines[i].strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+            if isinstance(parsed, dict):
+                query_refs = extract_fields_from_search(parsed)
+                refs.queried.update(query_refs.queried)
+                refs.filtered.update(query_refs.filtered)
+                refs.aggregated.update(query_refs.aggregated)
+                refs.sorted.update(query_refs.sorted)
+                refs.sourced.update(query_refs.sourced)
+                # Keep widest lookback
+                if query_refs.lookback:
+                    if refs.lookback is None or query_refs.lookback.seconds > refs.lookback.seconds:
+                        refs.lookback = query_refs.lookback
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
 
     return refs

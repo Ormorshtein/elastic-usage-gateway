@@ -16,7 +16,7 @@ import random
 import requests
 
 from config import GATEWAY_PORT
-from generator.queries import SCENARIOS, random_query
+from generator.queries import SCENARIOS
 
 GATEWAY_URL = f"http://localhost:{GATEWAY_PORT}"
 

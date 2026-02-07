@@ -258,3 +258,15 @@ class TestQueryBodyConfig:
             body=b'{"test": true}',
         )
         assert event["query_body"] is None
+
+    @patch.object(events_mod._random, "random", return_value=0.5)
+    def test_body_excluded_at_boundary(self, mock_rand):
+        """random() == sample_rate should be excluded (strict < comparison)."""
+        set_query_body_config(sample_rate=0.5)
+        refs = FieldRefs()
+        event = build_event(
+            index_name="x", operation="search", field_refs=refs,
+            method="POST", path="/x/_search", response_status=200, elapsed_ms=0,
+            body=b'{"test": true}',
+        )
+        assert event["query_body"] is None

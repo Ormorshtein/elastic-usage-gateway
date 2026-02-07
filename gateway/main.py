@@ -28,18 +28,23 @@ from pydantic import BaseModel
 from config import GATEWAY_HOST, GATEWAY_PORT, ES_HOST, USAGE_INDEX
 from gateway.proxy import proxy_request
 from gateway.extractor import extract_from_request
-from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, get_query_body_config, set_query_body_config
+from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, get_query_body_config, set_query_body_config, close_event_client
 from gateway.analyzer import compute_heat
 from gateway.ui import HTML_PAGE
 from gateway import metadata as metadata_mod
-import random as _random
-from generator.queries import SCENARIOS, DEFAULT_WEIGHTS, QUERY_FUNCTIONS
+import random
+from generator.queries import SCENARIOS
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+# Max response size to parse for concrete index extraction (10MB).
+# Prevents blocking the event loop on very large aggregation responses.
+_MAX_RESPONSE_PARSE_SIZE = 10 * 1024 * 1024
 
 
 def _resolve_concrete_indices(
@@ -49,23 +54,44 @@ def _resolve_concrete_indices(
 ) -> list[str] | None:
     """Resolve concrete index names from ES response hits.
 
-    For search operations with hits, extracts the actual _index from each hit
-    so we know which concrete indices were touched. For aggregation-only
-    queries (size=0, no hits), returns None — the caller uses the path index
-    as-is and the index_group field handles grouping.
+    When a query targets an alias (e.g. /logs/_search), the response hits
+    contain the actual concrete index names (e.g. logs-2024.01.15). This
+    function extracts those so we record the real index in the usage event.
+
+    For aggregation-only queries (size=0, no hits), returns None — the caller
+    uses the path index as-is and the index_group field handles grouping.
     """
-    if operation == "search":
-        try:
-            data = json.loads(response_body)
-            hits = data.get("hits", {}).get("hits", [])
-            if hits:
-                indices = list({h["_index"] for h in hits if "_index" in h})
-                if indices:
-                    return indices
-        except Exception:
-            pass
+    if operation != "search":
+        return None
+
+    # Skip parsing very large responses to avoid blocking the event loop
+    if len(response_body) > _MAX_RESPONSE_PARSE_SIZE:
+        return None
+
+    try:
+        data = json.loads(response_body)
+        hits = data.get("hits", {}).get("hits", [])
+        if hits:
+            indices = list({h["_index"] for h in hits if "_index" in h})
+            if indices:
+                return indices
+    except Exception:
+        pass
 
     return None
+
+
+# Operations that are ES-internal and shouldn't generate usage events
+_SKIP_OPERATIONS = {"cluster", "cat", "nodes", "tasks", "gateway"}
+
+
+def _should_skip_event(operation: str, indices: list[str] | None) -> bool:
+    """Return True if this request should not generate a usage event."""
+    if operation in _SKIP_OPERATIONS:
+        return True
+    if indices and any(idx.startswith(".") for idx in indices):
+        return True
+    return False
 
 
 @asynccontextmanager
@@ -77,6 +103,7 @@ async def lifespan(app: FastAPI):
     logger.info("Gateway ready — proxying to Elasticsearch")
     yield
     logger.info("Gateway shutting down")
+    await close_event_client()
 
 
 app = FastAPI(title="ES Usage Gateway", lifespan=lifespan)
@@ -209,7 +236,7 @@ async def generate(req: GenerateRequest):
     tasks_list = []
     breakdown: dict[str, int] = {}
     for _ in range(req.count):
-        idx = _random.choices(range(len(funcs)), weights=w, k=1)[0]
+        idx = random.choices(range(len(funcs)), weights=w, k=1)[0]
         query_name = names[idx]
         method, path, body = funcs[idx](lookback=req.lookback)
         breakdown[query_name] = breakdown.get(query_name, 0) + 1
@@ -328,16 +355,8 @@ async def proxy_catchall(request: Request):
         logger.exception("Extraction failed for %s — skipping event", metadata["path"])
         return response
 
-    # Skip emitting events for our own usage index to avoid infinite recursion
-    if indices and any(idx.startswith(".usage") for idx in indices):
-        return response
-
-    # Skip internal ES endpoints that aren't user queries
-    if operation in ("cluster", "cat", "nodes", "tasks", "gateway"):
-        return response
-
-    # Skip browser artifact requests (favicon.ico, etc.)
-    if indices and any(idx in ("favicon.ico",) for idx in indices):
+    # Skip events for internal operations (own usage index, ES system endpoints)
+    if _should_skip_event(operation, indices):
         return response
 
     # Step 3+4: build and emit event(s) — one per index for multi-index queries

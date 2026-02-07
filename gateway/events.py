@@ -1,8 +1,17 @@
 """
 Usage event model and asynchronous emission to Elasticsearch.
 
-Events are emitted in the background after responding to the client.
-Emission failures are logged but never affect request handling.
+Events are emitted in the background via asyncio.create_task() after the
+response has already been sent to the client. This "fire-and-forget" pattern
+ensures that observation never delays or blocks the proxied request.
+
+Thread safety: All state (module globals, httpx client) is accessed from the
+single asyncio event loop thread — no locks needed. The _query_body_enabled
+and _query_body_sample_rate globals are safe to read/write under asyncio's
+cooperative scheduling model (no preemption mid-assignment).
+
+Lifecycle: _event_client is created at module import and must be closed via
+close_event_client() during shutdown (called from the lifespan hook in main.py).
 """
 
 from __future__ import annotations
@@ -15,7 +24,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from config import ES_HOST, USAGE_INDEX, CLUSTER_ID, QUERY_BODY_ENABLED, QUERY_BODY_SAMPLE_RATE
+from config import ES_HOST, USAGE_INDEX, CLUSTER_ID, QUERY_BODY_ENABLED, QUERY_BODY_SAMPLE_RATE, EVENT_TIMEOUT
 from gateway.extractor import FieldRefs
 
 logger = logging.getLogger(__name__)
@@ -41,7 +50,7 @@ def set_query_body_config(enabled: bool | None = None, sample_rate: float | None
 
 # Dedicated client for writing usage events — separate from the proxy client
 # to avoid contention.
-_event_client = httpx.AsyncClient(base_url=ES_HOST, timeout=10.0)
+_event_client = httpx.AsyncClient(base_url=ES_HOST, timeout=EVENT_TIMEOUT)
 
 # Mapping for the .usage-events index
 USAGE_INDEX_MAPPING = {
@@ -183,3 +192,8 @@ def emit_event_background(event: dict) -> None:
         loop.create_task(emit_event(event))
     except RuntimeError:
         logger.debug("No event loop available for background emission")
+
+
+async def close_event_client() -> None:
+    """Close the event client. Called during gateway shutdown."""
+    await _event_client.aclose()

@@ -11,13 +11,13 @@ import logging
 import httpx
 from fastapi import Request, Response
 
-from config import ES_HOST
+from config import ES_HOST, PROXY_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
-# Long-lived async client — reused across requests.
-# Timeout is generous: bulk requests can be slow.
-_client = httpx.AsyncClient(base_url=ES_HOST, timeout=120.0)
+# Long-lived async client — reused across all requests for connection pooling.
+# Timeout is generous (default 120s) because bulk requests can be slow.
+_client = httpx.AsyncClient(base_url=ES_HOST, timeout=PROXY_TIMEOUT)
 
 
 async def proxy_request(request: Request) -> tuple[Response, dict]:

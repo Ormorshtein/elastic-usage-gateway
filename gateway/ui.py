@@ -177,13 +177,35 @@ function buildSliders() {
     const saved = localStorage.getItem(storageKey);
     const val = saved !== null ? parseInt(saved) : def;
     const label = s.labels[key] || key;
-    container.innerHTML += '<div class="slider-row">'
-      + '<span class="slider-label">' + label + '</span>'
-      + '<input type="range" min="0" max="100" value="' + val + '" id="s_' + key + '" '
-      + 'oninput="document.getElementById(\\'v_' + key + '\\').textContent=this.value; '
-      + 'localStorage.setItem(\\'w_' + activeScenario + '_' + key + '\\',this.value)">'
-      + '<span class="slider-value" id="v_' + key + '">' + val + '</span>'
-      + '</div>';
+
+    const row = document.createElement('div');
+    row.className = 'slider-row';
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'slider-label';
+    labelEl.textContent = label;
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = '0';
+    slider.max = '100';
+    slider.value = val;
+    slider.id = 's_' + key;
+
+    const valueEl = document.createElement('span');
+    valueEl.className = 'slider-value';
+    valueEl.id = 'v_' + key;
+    valueEl.textContent = val;
+
+    slider.oninput = function() {
+      valueEl.textContent = this.value;
+      localStorage.setItem(storageKey, this.value);
+    };
+
+    row.appendChild(labelEl);
+    row.appendChild(slider);
+    row.appendChild(valueEl);
+    container.appendChild(row);
   }
 }
 
@@ -337,7 +359,9 @@ async function loadQBConfig() {
     const pct = Math.round((qb.sample_rate || 0) * 100);
     document.getElementById('qb-rate').value = pct;
     document.getElementById('qb-rate-val').textContent = pct + '%';
-  } catch (e) {}
+  } catch (e) {
+    console.warn('Failed to load query body config:', e);
+  }
 }
 
 let _qbTimer = null;
@@ -352,7 +376,9 @@ function updateQBConfig() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ query_body: { enabled, sample_rate: rate } })
       });
-    } catch (e) {}
+    } catch (e) {
+      console.warn('Failed to update query body config:', e);
+    }
   }, 300);
 }
 

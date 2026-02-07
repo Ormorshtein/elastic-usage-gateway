@@ -18,14 +18,14 @@ from collections import defaultdict
 import httpx
 
 from config import (
-    ES_HOST, USAGE_INDEX,
+    ES_HOST, USAGE_INDEX, ANALYZER_TIMEOUT,
     INDEX_HEAT_HOT, INDEX_HEAT_WARM, INDEX_HEAT_COLD,
     FIELD_HEAT_HOT, FIELD_HEAT_WARM, FIELD_HEAT_COLD,
 )
 
 logger = logging.getLogger(__name__)
 
-_client = httpx.AsyncClient(base_url=ES_HOST, timeout=30.0)
+_client = httpx.AsyncClient(base_url=ES_HOST, timeout=ANALYZER_TIMEOUT)
 
 # Field usage categories we track
 FIELD_CATEGORIES = ("queried", "filtered", "aggregated", "sorted", "sourced", "written")
@@ -84,7 +84,23 @@ def _recommend_field(field_name: str, tier: str, cats: dict[str, int]) -> str | 
 
 
 def _compute_index_heat(bucket: dict, time_window_hours: float) -> dict:
-    """Compute heat report for a single concrete index bucket."""
+    """Compute heat report for a single concrete index bucket.
+
+    Expected bucket structure (from ES terms aggregation):
+        {
+            "key": "index-name",
+            "doc_count": 42,
+            "field_queried":    {"buckets": [{"key": "title", "doc_count": 10}, ...]},
+            "field_filtered":   {"buckets": [...]},
+            "field_aggregated": {"buckets": [...]},
+            "field_sorted":     {"buckets": [...]},
+            "field_sourced":    {"buckets": [...]},
+            "field_written":    {"buckets": [...]},
+        }
+
+    Each field_* sub-aggregation is a terms agg on the corresponding
+    fields.* keyword array from the usage event document.
+    """
     total_ops = bucket["doc_count"]
     ops_per_hour = total_ops / max(time_window_hours, 0.01)
     tier = _index_tier(ops_per_hour)

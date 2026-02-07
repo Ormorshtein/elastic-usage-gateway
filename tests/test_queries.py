@@ -13,12 +13,16 @@ from generator.queries import (
 class TestLogsFilterByLevel:
     def test_custom_lookback(self):
         method, path, body = logs_filter_by_level(lookback="6h")
+        assert method == "POST"
+        assert path == "/logs/_search"
         parsed = json.loads(body)
         range_val = parsed["query"]["bool"]["filter"][1]["range"]["timestamp"]["gte"]
         assert range_val == "now-6h"
 
     def test_default_random(self):
         method, path, body = logs_filter_by_level()
+        assert method == "POST"
+        assert path == "/logs/_search"
         parsed = json.loads(body)
         range_val = parsed["query"]["bool"]["filter"][1]["range"]["timestamp"]["gte"]
         assert range_val.startswith("now-")
@@ -28,6 +32,7 @@ class TestLogsFilterByLevel:
 
     def test_custom_lookback_days(self):
         method, path, body = logs_filter_by_level(lookback="30d")
+        assert method == "POST"
         parsed = json.loads(body)
         range_val = parsed["query"]["bool"]["filter"][1]["range"]["timestamp"]["gte"]
         assert range_val == "now-30d"
@@ -36,12 +41,15 @@ class TestLogsFilterByLevel:
 class TestLogsAggOverTime:
     def test_custom_lookback(self):
         method, path, body = logs_agg_over_time(lookback="1h")
+        assert method == "POST"
+        assert path == "/logs/_search"
         parsed = json.loads(body)
         range_val = parsed["query"]["range"]["timestamp"]["gte"]
         assert range_val == "now-1h"
 
     def test_default_24h(self):
         method, path, body = logs_agg_over_time()
+        assert method == "POST"
         parsed = json.loads(body)
         range_val = parsed["query"]["range"]["timestamp"]["gte"]
         assert range_val == "now-24h"
@@ -50,12 +58,16 @@ class TestLogsAggOverTime:
 class TestOrdersDateRange:
     def test_custom_lookback(self):
         method, path, body = orders_date_range(lookback="30d")
+        assert method == "POST"
+        assert path == "/orders/_search"
         parsed = json.loads(body)
         range_val = parsed["query"]["range"]["order_date"]["gte"]
         assert range_val == "now-30d"
 
     def test_default_random(self):
         method, path, body = orders_date_range()
+        assert method == "POST"
+        assert path == "/orders/_search"
         parsed = json.loads(body)
         range_val = parsed["query"]["range"]["order_date"]["gte"]
         assert range_val.startswith("now-")

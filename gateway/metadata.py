@@ -12,25 +12,29 @@ import logging
 
 import httpx
 
-from config import ES_HOST
+from config import ES_HOST, EVENT_TIMEOUT, METADATA_REFRESH_INTERVAL
 
 logger = logging.getLogger(__name__)
 
-_client = httpx.AsyncClient(base_url=ES_HOST, timeout=10.0)
+_client = httpx.AsyncClient(base_url=ES_HOST, timeout=EVENT_TIMEOUT)
 
 # Internal lookup: concrete index name → group name
 _index_to_group: dict[str, str] = {}
 
-# Groups listing: group name → list of concrete index names
-_groups: dict[str, list[str]] = {}
-
-REFRESH_INTERVAL_SECONDS = 60
+# Groups listing: group name → set of concrete index names
+_groups: dict[str, set[str]] = {}
 
 
 async def refresh() -> None:
-    """Fetch alias and data stream mappings from ES and rebuild the lookup."""
+    """Fetch alias and data stream mappings from ES and rebuild the lookup.
+
+    Data streams take priority over aliases — if an index belongs to both,
+    the data stream wins. The global state (_index_to_group, _groups) is
+    swapped atomically via Python reference assignment (safe under asyncio's
+    single-threaded model).
+    """
     new_lookup: dict[str, str] = {}
-    new_groups: dict[str, list[str]] = {}
+    new_groups: dict[str, set[str]] = {}
 
     # --- Aliases ---
     try:
@@ -46,11 +50,11 @@ async def refresh() -> None:
                     # Use the first alias as the group (most indices have one alias)
                     group = aliases[0]
                     new_lookup[index_name] = group
-                    new_groups.setdefault(group, []).append(index_name)
+                    new_groups.setdefault(group, set()).add(index_name)
                 else:
                     # No alias — index is its own group
                     new_lookup[index_name] = index_name
-                    new_groups.setdefault(index_name, []).append(index_name)
+                    new_groups.setdefault(index_name, set()).add(index_name)
         else:
             logger.warning("Failed to fetch aliases: %s", resp.status_code)
     except httpx.RequestError as exc:
@@ -70,13 +74,11 @@ async def refresh() -> None:
                     if old_group and old_group != idx_name:
                         # Remove from old alias group
                         if old_group in new_groups:
-                            new_groups[old_group] = [
-                                i for i in new_groups[old_group] if i != idx_name
-                            ]
+                            new_groups[old_group].discard(idx_name)
                             if not new_groups[old_group]:
                                 del new_groups[old_group]
                     new_lookup[idx_name] = ds_name
-                    new_groups.setdefault(ds_name, []).append(idx_name)
+                    new_groups.setdefault(ds_name, set()).add(idx_name)
         # 404 is fine — no data streams configured
         elif resp.status_code != 404:
             logger.warning("Failed to fetch data streams: %s", resp.status_code)
@@ -87,10 +89,9 @@ async def refresh() -> None:
     _index_to_group = new_lookup
     _groups = new_groups
 
-    group_count = len({v for v in new_lookup.values()})
     logger.info(
         "Metadata refreshed: %d concrete indices → %d groups",
-        len(new_lookup), group_count,
+        len(new_lookup), len(new_groups),
     )
 
 
@@ -115,7 +116,7 @@ def resolve_group(index_name: str) -> str:
 
 def get_groups() -> dict[str, list[str]]:
     """Return the current groups mapping (group_name → concrete indices)."""
-    return dict(_groups)
+    return {k: sorted(v) for k, v in _groups.items()}
 
 
 async def _refresh_loop() -> None:
@@ -125,11 +126,11 @@ async def _refresh_loop() -> None:
             await refresh()
         except Exception:
             logger.exception("Metadata refresh failed")
-        await asyncio.sleep(REFRESH_INTERVAL_SECONDS)
+        await asyncio.sleep(METADATA_REFRESH_INTERVAL)
 
 
 def start_refresh_loop() -> None:
     """Start the background metadata refresh loop. Call from within an async context."""
     loop = asyncio.get_running_loop()
     loop.create_task(_refresh_loop())
-    logger.info("Metadata refresh loop started (interval=%ds)", REFRESH_INTERVAL_SECONDS)
+    logger.info("Metadata refresh loop started (interval=%ds)", METADATA_REFRESH_INTERVAL)

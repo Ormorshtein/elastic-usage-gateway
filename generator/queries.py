@@ -376,19 +376,3 @@ SCENARIOS = {
         "time_range_queries": {"orders_date_range"},
     },
 }
-
-
-# Backwards-compatible aliases — used by main.py and generate.py
-QUERY_FUNCTIONS = SCENARIOS["products"]["queries"]
-DEFAULT_WEIGHTS = SCENARIOS["products"]["weights"]
-
-
-# Pre-compute for backwards compatibility
-_weights = list(DEFAULT_WEIGHTS.values())
-_funcs = list(QUERY_FUNCTIONS.values())
-
-
-def random_query() -> tuple[str, str, str | None]:
-    """Return a random (method, path, body) tuple from the products scenario."""
-    func = random.choices(_funcs, weights=_weights, k=1)[0]
-    return func()
