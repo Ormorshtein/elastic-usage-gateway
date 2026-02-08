@@ -172,6 +172,8 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="stat-box"><div class="stat-label">ES max response</div><div class="stat-value" id="st-es-time-max">-</div></div>
     <div class="stat-box"><div class="stat-label">Avg request time</div><div class="stat-value" id="st-request-time-avg">-</div></div>
     <div class="stat-box"><div class="stat-label">Max request time</div><div class="stat-value" id="st-request-time-max">-</div></div>
+    <div class="stat-box"><div class="stat-label">Rollups completed</div><div class="stat-value" id="st-rollups-completed">-</div></div>
+    <div class="stat-box"><div class="stat-label">Rollups failed</div><div class="stat-value" id="st-rollups-failed">-</div></div>
     <div class="stat-box"><div class="stat-label">Uptime</div><div class="stat-value" id="st-uptime">-</div></div>
     <div class="stat-box"><div class="stat-label">Index groups</div><div class="stat-value" id="st-groups">-</div></div>
   </div>
@@ -205,6 +207,29 @@ HTML_PAGE = """<!DOCTYPE html>
   <div style="font-size:13px; color:#888;">
     Effective sample rate: <span id="samp-effective-rate" style="color:#4f8ff7; font-weight:600;">100%</span>
     &nbsp;&mdash;&nbsp; Events sampled out: <span id="samp-sampled-out" style="color:#f0ad4e; font-weight:600;">0</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Rollups</h2>
+  <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:12px;">
+    <label style="font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px;">
+      Interval (sec):
+      <input type="range" id="rollup-interval" min="60" max="600" value="300" step="30" style="width:140px; accent-color:#4f8ff7;" oninput="document.getElementById('rollup-interval-val').textContent=this.value; updateRollupConfig()">
+      <span id="rollup-interval-val" style="font-size:14px; font-weight:600; color:#4f8ff7; width:36px;">300</span>
+    </label>
+    <label style="font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px;">
+      Raw retention (h):
+      <input type="number" id="rollup-retention-raw" value="1" min="0.5" max="48" step="0.5" style="width:70px; padding:4px 8px; border-radius:6px; border:1px solid #3a3d47; background:#0f1117; color:#fff; font-size:13px;" onchange="updateRollupConfig()">
+    </label>
+    <label style="font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px;">
+      Rollup retention (days):
+      <input type="number" id="rollup-retention-days" value="90" min="1" max="365" step="1" style="width:70px; padding:4px 8px; border-radius:6px; border:1px solid #3a3d47; background:#0f1117; color:#fff; font-size:13px;" onchange="updateRollupConfig()">
+    </label>
+  </div>
+  <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+    <button class="btn-run" id="btn-rollup-now" onclick="triggerRollup()" style="padding:8px 16px; font-size:13px;">Run Rollup Now</button>
+    <span id="rollup-status" style="font-size:13px; color:#888;"></span>
   </div>
 </div>
 
@@ -519,6 +544,8 @@ async function refreshStats() {
     set('st-metadata-refresh-ok', data.metadata_refresh_ok || 0);
     set('st-metadata-refresh-failed', data.metadata_refresh_failed || 0, true);
     set('st-events-sampled-out', data.events_sampled_out || 0);
+    set('st-rollups-completed', data.rollups_completed || 0);
+    set('st-rollups-failed', data.rollups_failed || 0, true);
     set('st-es-time-avg', (data.es_time_avg_ms || 0) + 'ms');
     set('st-es-time-max', (data.es_time_max_ms || 0) + 'ms');
     set('st-request-time-avg', (data.request_time_avg_ms || 0) + 'ms');
@@ -613,11 +640,73 @@ async function refreshSamplingRate() {
   } catch (e) {}
 }
 
+/* ==================== ROLLUP CONFIG ==================== */
+
+async function loadRollupConfig() {
+  try {
+    const resp = await fetch('/_gateway/config');
+    const data = await resp.json();
+    const r = data.rollup || {};
+    document.getElementById('rollup-interval').value = r.interval_seconds || 300;
+    document.getElementById('rollup-interval-val').textContent = r.interval_seconds || 300;
+    document.getElementById('rollup-retention-raw').value = r.raw_retention_hours || 1;
+    document.getElementById('rollup-retention-days').value = r.rollup_retention_days || 90;
+  } catch (e) {
+    console.warn('Failed to load rollup config:', e);
+  }
+}
+
+let _rollupTimer = null;
+function updateRollupConfig() {
+  clearTimeout(_rollupTimer);
+  _rollupTimer = setTimeout(async () => {
+    const interval = parseInt(document.getElementById('rollup-interval').value);
+    const rawHours = parseFloat(document.getElementById('rollup-retention-raw').value);
+    const rollupDays = parseInt(document.getElementById('rollup-retention-days').value);
+    try {
+      await fetch('/_gateway/config', {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ rollup: { interval_seconds: interval, raw_retention_hours: rawHours, rollup_retention_days: rollupDays } })
+      });
+    } catch (e) {
+      console.warn('Failed to update rollup config:', e);
+    }
+  }, 300);
+}
+
+async function triggerRollup() {
+  const btn = document.getElementById('btn-rollup-now');
+  const status = document.getElementById('rollup-status');
+  btn.disabled = true;
+  status.textContent = 'Running rollup...';
+  status.style.color = '#7ab8f5';
+  try {
+    const resp = await fetch('/_gateway/rollup', { method: 'POST' });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      status.textContent = 'Read ' + (data.events_read || 0) + ' events, wrote ' + (data.rollups_written || 0) + ' rollups, deleted ' + (data.raw_deleted || 0) + ' raw';
+      status.style.color = '#6fcf6f';
+    } else if (data.status === 'skipped') {
+      status.textContent = 'Skipped: ' + (data.reason || 'unknown');
+      status.style.color = '#f0ad4e';
+    } else {
+      status.textContent = 'Error: ' + JSON.stringify(data);
+      status.style.color = '#cf6f6f';
+    }
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = '#cf6f6f';
+  }
+  btn.disabled = false;
+}
+
 /* ==================== INIT ==================== */
 
 loadScenarios();
 loadQBConfig();
 loadSamplingConfig();
+loadRollupConfig();
 refreshStats();
 
 // Auto-refresh stats every 5 seconds

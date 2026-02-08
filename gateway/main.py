@@ -9,7 +9,8 @@ Routes:
   /_gateway/heat           — heat analysis endpoint (GET), ?index_group= filter
   /_gateway/groups         — index groups with concrete indices (GET)
   /_gateway/sample-events  — recent usage events (GET), ?index_group= filter
-  /_gateway/config         — query body storage config (GET/PATCH)
+  /_gateway/config         — runtime config: query body, sampling, rollups (GET/PATCH)
+  /_gateway/rollup         — trigger on-demand rollup (POST)
   /_gateway/health         — gateway health check with ES connectivity (GET)
   /_gateway/stats          — internal counters for monitoring (GET)
   /{path:path}             — everything else proxied to Elasticsearch
@@ -36,6 +37,8 @@ from gateway.events import (
     close_event_client,
 )
 from gateway.analyzer import compute_heat, close_analyzer_client
+from gateway import rollups as rollups_mod
+from gateway.rollups import run_rollup_now, get_rollup_config, set_rollup_config, close_rollup_client
 from gateway.ui import HTML_PAGE
 from gateway import metadata as metadata_mod
 from gateway.metadata import close_metadata_client
@@ -112,6 +115,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Could not ensure usage index at startup — will retry on first event")
     metadata_mod.start_refresh_loop()
+    rollups_mod.start_rollup_loop()
     logger.info("Gateway ready — proxying to Elasticsearch")
     yield
     logger.info("Gateway shutting down — closing clients")
@@ -119,6 +123,7 @@ async def lifespan(app: FastAPI):
     await close_proxy_client()
     await close_analyzer_client()
     await close_metadata_client()
+    await close_rollup_client()
 
 
 app = FastAPI(title="ES Usage Gateway", lifespan=lifespan)
@@ -183,6 +188,7 @@ async def get_config():
             **get_sampling_config(),
             "effective_rate": round(compute_sample_rate(), 4),
         },
+        "rollup": get_rollup_config(),
     }
 
 
@@ -204,6 +210,14 @@ async def update_config(request: Request):
         result["sampling"] = set_sampling_config(
             max_events_per_sec=samp.get("max_events_per_sec"),
             low_threshold=samp.get("low_threshold"),
+        )
+
+    rollup = body.get("rollup", {})
+    if rollup:
+        result["rollup"] = set_rollup_config(
+            interval_seconds=rollup.get("interval_seconds"),
+            raw_retention_hours=rollup.get("raw_retention_hours"),
+            rollup_retention_days=rollup.get("rollup_retention_days"),
         )
 
     return result
@@ -409,6 +423,13 @@ async def clear_events():
             content={"error": resp.text[:300]},
             status_code=resp.status_code,
         )
+
+
+@app.post("/_gateway/rollup")
+async def trigger_rollup():
+    """Trigger an on-demand rollup cycle."""
+    result = await run_rollup_now()
+    return result
 
 
 # --- Catch-all proxy route ---
