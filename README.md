@@ -5,12 +5,92 @@ A reverse-proxy gateway for Elasticsearch that observes query traffic and comput
 ## Architecture
 
 ```
-Query Generator → Gateway (port 9201) → Elasticsearch (port 9200)
-                     │
-                     └──▶ .usage-events index → Heat Analyzer
+Query Generator --> Gateway (port 9301) --> Elasticsearch (port 9200)
+                       |
+                       +---> .usage-events index --> Heat Analyzer
 ```
 
 For detailed architecture documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## How It Works
+
+The gateway sits between your application and Elasticsearch as a transparent proxy. Every query that passes through is **observed but never modified** — the gateway parses the Elasticsearch Query DSL to extract which fields are being used and how.
+
+### Extraction Example
+
+When a search request like this passes through the gateway:
+
+```
+POST /products/_search
+```
+```json
+{
+  "query": {
+    "bool": {
+      "must": [
+        { "match": { "title": "wireless headphones" } }
+      ],
+      "filter": [
+        { "term": { "category": "electronics" } },
+        { "range": { "price": { "gte": 20, "lte": 100 } } }
+      ]
+    }
+  },
+  "aggs": {
+    "by_brand": { "terms": { "field": "brand" } },
+    "avg_rating": { "avg": { "field": "rating" } }
+  },
+  "sort": [{ "price": "desc" }],
+  "_source": ["title", "price", "brand"]
+}
+```
+
+The gateway extracts field usage into categories:
+
+| Category | Fields | Meaning |
+|----------|--------|---------|
+| **queried** | `title` | Used in `match`, `term`, `multi_match`, etc. |
+| **filtered** | `category`, `price` | Used inside `bool.filter` context |
+| **aggregated** | `brand`, `rating` | Used in aggregations (`terms`, `avg`, etc.) |
+| **sorted** | `price` | Used in `sort` clauses |
+| **sourced** | `title`, `price`, `brand` | Returned in `_source` |
+
+This produces a usage event stored in `.usage-events`:
+
+```json
+{
+  "timestamp": "2026-02-08T12:00:00Z",
+  "index": "products",
+  "index_group": "products",
+  "operation": "search",
+  "fields": {
+    "queried": ["title"],
+    "filtered": ["category", "price"],
+    "aggregated": ["brand", "rating"],
+    "sorted": ["price"],
+    "sourced": ["brand", "price", "title"],
+    "written": []
+  },
+  "response_time_ms": 42.5,
+  "response_status": 200
+}
+```
+
+Over time, these events accumulate and the **heat analyzer** computes proportional field heat: if `title` appears in 30% of all field references for the `products` index, it's classified as **hot**. If `legacy_supplier_code` never appears, it's **unused** — a candidate for `"index": false` to save disk and indexing cost.
+
+The extractor also handles:
+- **Bulk requests** (`_bulk`): extracts written fields from index/create/update actions, including unwrapping `doc`/`upsert` wrappers
+- **Multi-search** (`_msearch`): parses each query in the NDJSON body
+- **Lookback windows**: detects `now-24h` style range filters and records the time window
+
+### Event Sampling
+
+In production, high-traffic clusters can generate a large volume of usage events. The gateway supports **configurable event sampling** to reduce load on the `.usage-events` index:
+
+- Set `EVENT_SAMPLE_RATE` (0.0-1.0) to control what fraction of requests emit events
+- Adjustable at runtime via the UI slider or `PATCH /_gateway/config`
+- **Field heat is unaffected** by sampling — heat scores are proportions (ratios), so both numerator and denominator scale equally
+- Index heat (ops/hour) will be proportionally lower, but relative rankings between indices are preserved
 
 ## Quick Start
 
@@ -32,7 +112,7 @@ pip install -r requirements.txt
 
 ```bash
 python -m gateway.main
-# Gateway listens on port 9201, proxies to ES on port 9200
+# Gateway listens on port 9301, proxies to ES on port 9200
 ```
 
 ### 4. Seed Sample Data
@@ -52,7 +132,7 @@ python -m generator.generate --duration 60 --rps 10
 ### 6. View Heat Report
 
 ```bash
-curl http://localhost:9201/_gateway/heat | python -m json.tool
+curl http://localhost:9301/_gateway/heat | python -m json.tool
 ```
 
 ## Expected Results
@@ -73,13 +153,16 @@ All settings via environment variables (see `config.py`):
 |----------|---------|-------------|
 | `ES_HOST` | `http://localhost:9200` | Elasticsearch URL |
 | `GATEWAY_HOST` | `0.0.0.0` | Gateway bind address |
-| `GATEWAY_PORT` | `9201` | Gateway listen port |
+| `GATEWAY_PORT` | `9301` | Gateway listen port |
 | `USAGE_INDEX` | `.usage-events` | Index for storing usage events |
 | `CLUSTER_ID` | `default` | Cluster identifier |
 | `PROXY_TIMEOUT` | `120` | Proxy request timeout (seconds) |
 | `EVENT_TIMEOUT` | `10` | Event emission timeout (seconds) |
 | `ANALYZER_TIMEOUT` | `30` | Heat analysis query timeout (seconds) |
 | `METADATA_REFRESH_INTERVAL` | `60` | Metadata cache refresh (seconds) |
+| `EVENT_SAMPLE_RATE` | `1.0` | Fraction of requests that emit events (0.0-1.0) |
+| `QUERY_BODY_ENABLED` | `true` | Store query bodies in events |
+| `QUERY_BODY_SAMPLE_RATE` | `1.0` | Fraction of events to store bodies |
 
 ## API Endpoints
 
@@ -90,7 +173,7 @@ All settings via environment variables (see `config.py`):
 | `GET /_gateway/heat?hours=24` | Heat report for the last N hours |
 | `GET /_gateway/groups` | Index groups with concrete indices |
 | `GET /_gateway/sample-events` | Recent usage events for debugging |
-| `GET/PATCH /_gateway/config` | Query body storage configuration |
+| `GET/PATCH /_gateway/config` | Event sampling and query body storage config |
 | `GET /_gateway/ui` | Control panel UI |
 | `POST /_gateway/generate` | Run query generator from UI |
 | `DELETE /_gateway/events` | Clear all usage events |
@@ -101,7 +184,7 @@ All settings via environment variables (see `config.py`):
 ### Health Check
 
 ```bash
-curl http://localhost:9201/_gateway/health
+curl http://localhost:9301/_gateway/health
 ```
 
 Returns **200** when ES is reachable:
@@ -133,7 +216,7 @@ Use this endpoint for load balancer health checks or uptime monitoring.
 ### Internal Stats
 
 ```bash
-curl http://localhost:9201/_gateway/stats
+curl http://localhost:9301/_gateway/stats
 ```
 
 Returns all internal counters:
@@ -144,6 +227,7 @@ Returns all internal counters:
   "events_emitted": 4500,
   "events_failed": 8,
   "events_skipped": 490,
+  "events_sampled_out": 120,
   "extraction_errors": 0,
   "metadata_refresh_ok": 60,
   "metadata_refresh_failed": 0,
@@ -157,6 +241,7 @@ Returns all internal counters:
 
 Key metrics to watch:
 - **events_failed** — if this grows steadily, event writes to ES are failing
+- **events_sampled_out** — events skipped due to sampling (expected when rate < 100%)
 - **requests_failed** — proxy 502 errors (ES unreachable for proxied requests)
 - **extraction_errors** — DSL parsing failures (should be rare/zero)
 - **metadata_refresh_failed** — if this grows, the alias/data stream cache is stale

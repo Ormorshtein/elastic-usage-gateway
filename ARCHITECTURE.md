@@ -15,7 +15,7 @@ This enables data-driven decisions about ILM (Index Lifecycle Management), mappi
 
 ```
                           ┌─────────────────────────────────────┐
-                          │          Gateway (port 9201)         │
+                          │          Gateway (port 9301)         │
                           │                                     │
   Client / Generator ───► │  FastAPI catch-all ──► Proxy ──────►│──► Elasticsearch (9200)
                           │       │                             │
@@ -44,7 +44,7 @@ This enables data-driven decisions about ILM (Index Lifecycle Management), mappi
 1. **Proxy**: Forward the request to ES, get response. Never block or modify.
 2. **Extract**: Parse path (index, operation) and body (field references from DSL/bulk/msearch).
 3. **Skip check**: Ignore internal operations (cluster, cat, nodes) and system indices (`.` prefix).
-4. **Resolve**: Extract concrete index names from response hits (alias → concrete).
+4. **Sample check**: Probabilistically skip event emission based on `EVENT_SAMPLE_RATE` (reduces ES load in production).
 5. **Group**: Look up the logical group (alias or data stream) via metadata cache.
 6. **Emit**: Build a usage event document and emit it as a fire-and-forget background task.
 7. **Return**: Send the ES response to the client unchanged.
@@ -89,6 +89,7 @@ The extractor never raises exceptions — it returns what it can find.
 Builds usage event documents and writes them to the `.usage-events` index. Events are emitted as fire-and-forget background tasks via `asyncio.create_task()` — failures are logged but never affect request handling.
 
 Features:
+- **Event sampling**: Configurable `EVENT_SAMPLE_RATE` (0.0-1.0) to reduce event volume in production. Field heat (proportional) is unaffected; index heat (absolute ops/hour) scales proportionally but relative rankings are preserved. Runtime-adjustable via UI or config API.
 - **Query fingerprinting**: SHA-256 of canonicalized JSON for deduplication.
 - **Query body storage**: Optional, with configurable sampling rate (runtime-adjustable).
 - **Dedicated httpx client**: Separate from the proxy client to avoid contention.
@@ -114,11 +115,11 @@ Periodically fetches alias and data stream mappings from ES and maintains an in-
 ### gateway/ui.py — Control Panel
 
 Single-page HTML/JS control panel served at `/_gateway/ui`. Provides:
-- Heat report visualization with tier-colored badges.
-- Per-group drill-down with field-level breakdown.
 - Traffic generator controls with per-query-type weight sliders.
 - Lookback override for time-range queries.
+- Event sampling rate slider.
 - Query body sampling configuration.
+- Live gateway stats (auto-refresh).
 
 ### gateway/metrics.py — In-Memory Counters
 
@@ -147,7 +148,7 @@ All settings are read from environment variables with defaults for local develop
 |----------|---------|-------------|
 | `ES_HOST` | `http://localhost:9200` | Elasticsearch URL |
 | `GATEWAY_HOST` | `0.0.0.0` | Gateway bind address |
-| `GATEWAY_PORT` | `9201` | Gateway bind port |
+| `GATEWAY_PORT` | `9301` | Gateway bind port |
 | `USAGE_INDEX` | `.usage-events` | Index name for usage events |
 | `CLUSTER_ID` | `default` | Cluster identifier in events |
 | `PROXY_TIMEOUT` | `120` | Proxy request timeout (seconds) |
@@ -160,6 +161,7 @@ All settings are read from environment variables with defaults for local develop
 | `FIELD_HEAT_HOT` | `0.15` | Hot field threshold (proportion) |
 | `FIELD_HEAT_WARM` | `0.05` | Warm field threshold (proportion) |
 | `FIELD_HEAT_COLD` | `0.01` | Cold field threshold (proportion) |
+| `EVENT_SAMPLE_RATE` | `1.0` | Fraction of requests that emit events |
 | `QUERY_BODY_ENABLED` | `true` | Store query bodies in events |
 | `QUERY_BODY_SAMPLE_RATE` | `1.0` | Fraction of events to store bodies |
 

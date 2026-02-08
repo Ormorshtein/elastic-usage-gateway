@@ -7,7 +7,7 @@ A reverse proxy gateway that sits in front of Elasticsearch, intercepts all traf
 ## Architecture
 
 - **ES + Kibana**: Docker containers via `docker-compose.yml` (ports 9200, 5601)
-- **Gateway**: Local Python process — FastAPI + httpx async proxy (port 9201)
+- **Gateway**: Local Python process — FastAPI + httpx async proxy (port 9301)
 - **UI**: Inline HTML served by gateway at `/_gateway/ui` (no build step)
 
 ## Running
@@ -15,7 +15,7 @@ A reverse proxy gateway that sits in front of Elasticsearch, intercepts all traf
 ```bash
 docker compose up -d                    # Start ES + Kibana
 python -m generator.seed                # Seed products index (once)
-python -m gateway.main                  # Start gateway on :9201
+python -m gateway.main                  # Start gateway on :9301
 python kibana_setup.py --no-wait        # Import Kibana dashboards
 ```
 
