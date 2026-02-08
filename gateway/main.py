@@ -9,15 +9,13 @@ Routes:
   /_gateway/heat           — heat analysis endpoint (GET), ?index_group= filter
   /_gateway/groups         — index groups with concrete indices (GET)
   /_gateway/sample-events  — recent usage events (GET), ?index_group= filter
-  /_gateway/config         — runtime config: query body, sampling, rollups (GET/PATCH)
-  /_gateway/rollup         — trigger on-demand rollup (POST)
+  /_gateway/config         — query body storage config (GET/PATCH)
   /_gateway/health         — gateway health check with ES connectivity (GET)
   /_gateway/stats          — internal counters for monitoring (GET)
   /{path:path}             — everything else proxied to Elasticsearch
 """
 
 import asyncio
-import json
 import time
 import logging
 import uvicorn
@@ -30,15 +28,8 @@ from pydantic import BaseModel
 from config import GATEWAY_HOST, GATEWAY_PORT, ES_HOST, USAGE_INDEX
 from gateway.proxy import proxy_request, close_proxy_client
 from gateway.extractor import extract_from_request
-from gateway.events import (
-    build_event, emit_event, emit_event_background, ensure_usage_index,
-    update_mapping, get_query_body_config, set_query_body_config,
-    get_sampling_config, set_sampling_config, compute_sample_rate,
-    close_event_client,
-)
+from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, get_query_body_config, set_query_body_config, close_event_client
 from gateway.analyzer import compute_heat, close_analyzer_client
-from gateway import rollups as rollups_mod
-from gateway.rollups import run_rollup_now, get_rollup_config, set_rollup_config, close_rollup_client
 from gateway.ui import HTML_PAGE
 from gateway import metadata as metadata_mod
 from gateway.metadata import close_metadata_client
@@ -51,45 +42,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-
-# Max response size to parse for concrete index extraction (10MB).
-# Prevents blocking the event loop on very large aggregation responses.
-_MAX_RESPONSE_PARSE_SIZE = 10 * 1024 * 1024
-
-
-def _resolve_concrete_indices(
-    response_body: bytes,
-    operation: str,
-    path_indices: list[str] | None,
-) -> list[str] | None:
-    """Resolve concrete index names from ES response hits.
-
-    When a query targets an alias (e.g. /logs/_search), the response hits
-    contain the actual concrete index names (e.g. logs-2024.01.15). This
-    function extracts those so we record the real index in the usage event.
-
-    For aggregation-only queries (size=0, no hits), returns None — the caller
-    uses the path index as-is and the index_group field handles grouping.
-    """
-    if operation != "search":
-        return None
-
-    # Skip parsing very large responses to avoid blocking the event loop
-    if len(response_body) > _MAX_RESPONSE_PARSE_SIZE:
-        return None
-
-    try:
-        data = json.loads(response_body)
-        hits = data.get("hits", {}).get("hits", [])
-        if hits:
-            indices = list({h["_index"] for h in hits if "_index" in h})
-            if indices:
-                return indices
-    except Exception:
-        pass
-
-    return None
 
 
 # Operations that are ES-internal and shouldn't generate usage events
@@ -111,11 +63,9 @@ async def lifespan(app: FastAPI):
     logger.info("Gateway starting — ensuring usage index exists")
     try:
         await ensure_usage_index()
-        await update_mapping()
     except Exception:
         logger.warning("Could not ensure usage index at startup — will retry on first event")
     metadata_mod.start_refresh_loop()
-    rollups_mod.start_rollup_loop()
     logger.info("Gateway ready — proxying to Elasticsearch")
     yield
     logger.info("Gateway shutting down — closing clients")
@@ -123,7 +73,6 @@ async def lifespan(app: FastAPI):
     await close_proxy_client()
     await close_analyzer_client()
     await close_metadata_client()
-    await close_rollup_client()
 
 
 app = FastAPI(title="ES Usage Gateway", lifespan=lifespan)
@@ -182,45 +131,19 @@ async def stats():
 @app.get("/_gateway/config")
 async def get_config():
     """Return current gateway runtime configuration."""
-    return {
-        "query_body": get_query_body_config(),
-        "sampling": {
-            **get_sampling_config(),
-            "effective_rate": round(compute_sample_rate(), 4),
-        },
-        "rollup": get_rollup_config(),
-    }
+    return {"query_body": get_query_body_config()}
 
 
 @app.patch("/_gateway/config")
 async def update_config(request: Request):
-    """Update gateway runtime configuration (query body, sampling, rollups)."""
+    """Update gateway runtime configuration (e.g. query body sampling)."""
     body = await request.json()
-    result = {}
-
     qb = body.get("query_body", {})
-    if qb:
-        result["query_body"] = set_query_body_config(
-            enabled=qb.get("enabled"),
-            sample_rate=qb.get("sample_rate"),
-        )
-
-    samp = body.get("sampling", {})
-    if samp:
-        result["sampling"] = set_sampling_config(
-            max_events_per_sec=samp.get("max_events_per_sec"),
-            low_threshold=samp.get("low_threshold"),
-        )
-
-    rollup = body.get("rollup", {})
-    if rollup:
-        result["rollup"] = set_rollup_config(
-            interval_seconds=rollup.get("interval_seconds"),
-            raw_retention_hours=rollup.get("raw_retention_hours"),
-            rollup_retention_days=rollup.get("rollup_retention_days"),
-        )
-
-    return result
+    result = set_query_body_config(
+        enabled=qb.get("enabled"),
+        sample_rate=qb.get("sample_rate"),
+    )
+    return {"query_body": result}
 
 
 @app.get("/_gateway/heat")
@@ -370,25 +293,23 @@ async def generate(req: GenerateRequest):
             indices, operation, field_refs = extract_from_request(
                 path=path, method=method, body=body_bytes,
             )
-            concrete = _resolve_concrete_indices(resp.content, operation, indices)
-            index_list = concrete or indices or [None]
             elapsed_ms = resp.elapsed.total_seconds() * 1000 if hasattr(resp, 'elapsed') else 0
             metrics.observe_es_time(elapsed_ms)
-            for idx_name in index_list:
-                group = metadata_mod.resolve_group(idx_name) if idx_name else None
-                event = build_event(
-                    index_name=idx_name,
-                    operation=operation,
-                    field_refs=field_refs,
-                    method=method,
-                    path=path,
-                    response_status=resp.status_code,
-                    elapsed_ms=elapsed_ms,
-                    client_id="control-panel",
-                    body=body_bytes,
-                    index_group=group,
-                )
-                emit_event_background(event)
+            idx_name = indices[0] if indices else None
+            group = metadata_mod.resolve_group(idx_name) if idx_name else None
+            event = build_event(
+                index_name=idx_name,
+                operation=operation,
+                field_refs=field_refs,
+                method=method,
+                path=path,
+                response_status=resp.status_code,
+                elapsed_ms=elapsed_ms,
+                client_id="control-panel",
+                body=body_bytes,
+                index_group=group,
+            )
+            emit_event_background(event)
         except Exception:
             logger.debug("Event emission failed for generated query", exc_info=True)
 
@@ -397,23 +318,11 @@ async def generate(req: GenerateRequest):
 
 @app.delete("/_gateway/events")
 async def clear_events():
-    """Delete raw usage events (preserves rollup documents)."""
-    # Match raw events and legacy events that lack a type field
-    query = {
-        "query": {
-            "bool": {
-                "should": [
-                    {"term": {"type": "raw"}},
-                    {"bool": {"must_not": {"exists": {"field": "type"}}}},
-                ],
-                "minimum_should_match": 1,
-            }
-        }
-    }
+    """Delete all documents in the usage-events index."""
     async with httpx.AsyncClient(base_url=ES_HOST, timeout=30.0) as client:
         resp = await client.post(
             f"/{USAGE_INDEX}/_delete_by_query",
-            json=query,
+            json={"query": {"match_all": {}}},
             params={"refresh": "true"},
         )
         if resp.status_code == 200:
@@ -423,13 +332,6 @@ async def clear_events():
             content={"error": resp.text[:300]},
             status_code=resp.status_code,
         )
-
-
-@app.post("/_gateway/rollup")
-async def trigger_rollup():
-    """Trigger an on-demand rollup cycle."""
-    result = await run_rollup_now()
-    return result
 
 
 # --- Catch-all proxy route ---
@@ -474,26 +376,23 @@ async def proxy_catchall(request: Request):
         metrics.inc("events_skipped")
         return response
 
-    # Step 3+4: build and emit event(s) — one per index for multi-index queries
-    # Prefer concrete indices from ES response (resolves alias → actual indices)
+    # Step 3+4: build and emit one event per query
     client_id = request.headers.get("x-client-id")
-    concrete = _resolve_concrete_indices(metadata.get("response_body", b""), operation, indices)
-    index_list = concrete or indices or [None]
-    for idx in index_list:
-        group = metadata_mod.resolve_group(idx) if idx else None
-        event = build_event(
-            index_name=idx,
-            operation=operation,
-            field_refs=field_refs,
-            method=metadata["method"],
-            path=metadata["path"],
-            response_status=metadata["response_status"],
-            elapsed_ms=metadata["elapsed_ms"],
-            client_id=client_id,
-            body=metadata["body"],
-            index_group=group,
-        )
-        emit_event_background(event)
+    idx = indices[0] if indices else None
+    group = metadata_mod.resolve_group(idx) if idx else None
+    event = build_event(
+        index_name=idx,
+        operation=operation,
+        field_refs=field_refs,
+        method=metadata["method"],
+        path=metadata["path"],
+        response_status=metadata["response_status"],
+        elapsed_ms=metadata["elapsed_ms"],
+        client_id=client_id,
+        body=metadata["body"],
+        index_group=group,
+    )
+    emit_event_background(event)
 
     return response
 
