@@ -167,6 +167,7 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="stat-box"><div class="stat-label">Extraction errors</div><div class="stat-value" id="st-extraction-errors">-</div></div>
     <div class="stat-box"><div class="stat-label">Metadata refreshes</div><div class="stat-value" id="st-metadata-refresh-ok">-</div></div>
     <div class="stat-box"><div class="stat-label">Metadata failures</div><div class="stat-value" id="st-metadata-refresh-failed">-</div></div>
+    <div class="stat-box"><div class="stat-label">Sampled out</div><div class="stat-value" id="st-events-sampled-out">-</div></div>
     <div class="stat-box"><div class="stat-label">ES avg response</div><div class="stat-value" id="st-es-time-avg">-</div></div>
     <div class="stat-box"><div class="stat-label">ES max response</div><div class="stat-value" id="st-es-time-max">-</div></div>
     <div class="stat-box"><div class="stat-label">Avg request time</div><div class="stat-value" id="st-request-time-avg">-</div></div>
@@ -189,6 +190,21 @@ HTML_PAGE = """<!DOCTYPE html>
       <input type="range" id="qb-rate" min="0" max="100" value="100" style="width:120px; accent-color:#4f8ff7;" oninput="document.getElementById('qb-rate-val').textContent=this.value+'%'; updateQBConfig()">
       <span id="qb-rate-val" style="font-size:14px; font-weight:600; color:#4f8ff7; width:40px;">100%</span>
     </label>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Event Sampling</h2>
+  <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:12px;">
+    <label style="font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px;">
+      Max events/sec:
+      <input type="range" id="samp-max-eps" min="1" max="500" value="50" style="width:140px; accent-color:#4f8ff7;" oninput="document.getElementById('samp-max-eps-val').textContent=this.value; updateSamplingConfig()">
+      <span id="samp-max-eps-val" style="font-size:14px; font-weight:600; color:#4f8ff7; width:36px;">50</span>
+    </label>
+  </div>
+  <div style="font-size:13px; color:#888;">
+    Effective sample rate: <span id="samp-effective-rate" style="color:#4f8ff7; font-weight:600;">100%</span>
+    &nbsp;&mdash;&nbsp; Events sampled out: <span id="samp-sampled-out" style="color:#f0ad4e; font-weight:600;">0</span>
   </div>
 </div>
 
@@ -502,6 +518,7 @@ async function refreshStats() {
     set('st-extraction-errors', data.extraction_errors || 0, true);
     set('st-metadata-refresh-ok', data.metadata_refresh_ok || 0);
     set('st-metadata-refresh-failed', data.metadata_refresh_failed || 0, true);
+    set('st-events-sampled-out', data.events_sampled_out || 0);
     set('st-es-time-avg', (data.es_time_avg_ms || 0) + 'ms');
     set('st-es-time-max', (data.es_time_max_ms || 0) + 'ms');
     set('st-request-time-avg', (data.request_time_avg_ms || 0) + 'ms');
@@ -546,14 +563,65 @@ function updateQBConfig() {
   }, 300);
 }
 
+/* ==================== SAMPLING CONFIG ==================== */
+
+async function loadSamplingConfig() {
+  try {
+    const resp = await fetch('/_gateway/config');
+    const data = await resp.json();
+    const samp = data.sampling || {};
+    const maxEps = Math.round(samp.max_events_per_sec || 50);
+    document.getElementById('samp-max-eps').value = maxEps;
+    document.getElementById('samp-max-eps-val').textContent = maxEps;
+    const rate = samp.effective_rate != null ? samp.effective_rate : 1.0;
+    document.getElementById('samp-effective-rate').textContent = Math.round(rate * 100) + '%';
+  } catch (e) {
+    console.warn('Failed to load sampling config:', e);
+  }
+}
+
+let _sampTimer = null;
+function updateSamplingConfig() {
+  clearTimeout(_sampTimer);
+  _sampTimer = setTimeout(async () => {
+    const maxEps = parseInt(document.getElementById('samp-max-eps').value);
+    try {
+      const resp = await fetch('/_gateway/config', {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ sampling: { max_events_per_sec: maxEps } })
+      });
+      const data = await resp.json();
+      // Refresh effective rate from next stats poll
+    } catch (e) {
+      console.warn('Failed to update sampling config:', e);
+    }
+  }, 300);
+}
+
+async function refreshSamplingRate() {
+  try {
+    const resp = await fetch('/_gateway/config');
+    const data = await resp.json();
+    const samp = data.sampling || {};
+    const rate = samp.effective_rate != null ? samp.effective_rate : 1.0;
+    document.getElementById('samp-effective-rate').textContent = Math.round(rate * 100) + '%';
+
+    const resp2 = await fetch('/_gateway/stats');
+    const stats = await resp2.json();
+    document.getElementById('samp-sampled-out').textContent = (stats.events_sampled_out || 0).toLocaleString();
+  } catch (e) {}
+}
+
 /* ==================== INIT ==================== */
 
 loadScenarios();
 loadQBConfig();
+loadSamplingConfig();
 refreshStats();
 
 // Auto-refresh stats every 5 seconds
-setInterval(refreshStats, 5000);
+setInterval(() => { refreshStats(); refreshSamplingRate(); }, 5000);
 </script>
 </body>
 </html>

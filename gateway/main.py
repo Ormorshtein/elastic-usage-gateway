@@ -29,7 +29,12 @@ from pydantic import BaseModel
 from config import GATEWAY_HOST, GATEWAY_PORT, ES_HOST, USAGE_INDEX
 from gateway.proxy import proxy_request, close_proxy_client
 from gateway.extractor import extract_from_request
-from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, get_query_body_config, set_query_body_config, close_event_client
+from gateway.events import (
+    build_event, emit_event, emit_event_background, ensure_usage_index,
+    update_mapping, get_query_body_config, set_query_body_config,
+    get_sampling_config, set_sampling_config, compute_sample_rate,
+    close_event_client,
+)
 from gateway.analyzer import compute_heat, close_analyzer_client
 from gateway.ui import HTML_PAGE
 from gateway import metadata as metadata_mod
@@ -103,6 +108,7 @@ async def lifespan(app: FastAPI):
     logger.info("Gateway starting — ensuring usage index exists")
     try:
         await ensure_usage_index()
+        await update_mapping()
     except Exception:
         logger.warning("Could not ensure usage index at startup — will retry on first event")
     metadata_mod.start_refresh_loop()
@@ -171,19 +177,36 @@ async def stats():
 @app.get("/_gateway/config")
 async def get_config():
     """Return current gateway runtime configuration."""
-    return {"query_body": get_query_body_config()}
+    return {
+        "query_body": get_query_body_config(),
+        "sampling": {
+            **get_sampling_config(),
+            "effective_rate": round(compute_sample_rate(), 4),
+        },
+    }
 
 
 @app.patch("/_gateway/config")
 async def update_config(request: Request):
-    """Update gateway runtime configuration (e.g. query body sampling)."""
+    """Update gateway runtime configuration (query body, sampling, rollups)."""
     body = await request.json()
+    result = {}
+
     qb = body.get("query_body", {})
-    result = set_query_body_config(
-        enabled=qb.get("enabled"),
-        sample_rate=qb.get("sample_rate"),
-    )
-    return {"query_body": result}
+    if qb:
+        result["query_body"] = set_query_body_config(
+            enabled=qb.get("enabled"),
+            sample_rate=qb.get("sample_rate"),
+        )
+
+    samp = body.get("sampling", {})
+    if samp:
+        result["sampling"] = set_sampling_config(
+            max_events_per_sec=samp.get("max_events_per_sec"),
+            low_threshold=samp.get("low_threshold"),
+        )
+
+    return result
 
 
 @app.get("/_gateway/heat")
@@ -360,11 +383,23 @@ async def generate(req: GenerateRequest):
 
 @app.delete("/_gateway/events")
 async def clear_events():
-    """Delete all documents in the usage-events index."""
+    """Delete raw usage events (preserves rollup documents)."""
+    # Match raw events and legacy events that lack a type field
+    query = {
+        "query": {
+            "bool": {
+                "should": [
+                    {"term": {"type": "raw"}},
+                    {"bool": {"must_not": {"exists": {"field": "type"}}}},
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+    }
     async with httpx.AsyncClient(base_url=ES_HOST, timeout=30.0) as client:
         resp = await client.post(
             f"/{USAGE_INDEX}/_delete_by_query",
-            json={"query": {"match_all": {}}},
+            json=query,
             params={"refresh": "true"},
         )
         if resp.status_code == 200:

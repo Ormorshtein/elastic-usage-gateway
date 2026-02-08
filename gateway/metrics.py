@@ -18,6 +18,9 @@ _counters = {
     "extraction_errors": 0,
     "metadata_refresh_ok": 0,
     "metadata_refresh_failed": 0,
+    "events_sampled_out": 0,
+    "rollups_completed": 0,
+    "rollups_failed": 0,
 }
 
 # Timing trackers: each has its own count so avg is independent of counters.
@@ -28,6 +31,19 @@ _request_time = {"sum_ms": 0.0, "max_ms": 0.0, "count": 0}
 def inc(name: str) -> None:
     """Increment a counter by 1."""
     _counters[name] = _counters.get(name, 0) + 1
+
+
+def inc_by(name: str, amount: int) -> None:
+    """Increment a counter by a specific amount."""
+    _counters[name] = _counters.get(name, 0) + amount
+
+
+def get_requests_per_second() -> float:
+    """Compute average requests per second since startup."""
+    uptime = (datetime.now(timezone.utc) - _startup_time).total_seconds()
+    if uptime < 1.0:
+        return 0.0
+    return _counters.get("requests_proxied", 0) / uptime
 
 
 def observe_es_time(ms: float) -> None:
