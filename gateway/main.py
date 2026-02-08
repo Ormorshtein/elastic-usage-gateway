@@ -28,7 +28,7 @@ from pydantic import BaseModel
 from config import GATEWAY_HOST, GATEWAY_PORT, ES_HOST, USAGE_INDEX
 from gateway.proxy import proxy_request, close_proxy_client
 from gateway.extractor import extract_from_request
-from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, get_query_body_config, set_query_body_config, close_event_client
+from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, should_sample_event, get_event_sample_config, set_event_sample_config, get_query_body_config, set_query_body_config, close_event_client
 from gateway.analyzer import compute_heat, close_analyzer_client
 from gateway.ui import HTML_PAGE
 from gateway import metadata as metadata_mod
@@ -131,19 +131,26 @@ async def stats():
 @app.get("/_gateway/config")
 async def get_config():
     """Return current gateway runtime configuration."""
-    return {"query_body": get_query_body_config()}
+    return {
+        "event_sampling": get_event_sample_config(),
+        "query_body": get_query_body_config(),
+    }
 
 
 @app.patch("/_gateway/config")
 async def update_config(request: Request):
-    """Update gateway runtime configuration (e.g. query body sampling)."""
+    """Update gateway runtime configuration."""
     body = await request.json()
+    es = body.get("event_sampling", {})
+    event_sampling = set_event_sample_config(
+        sample_rate=es.get("sample_rate"),
+    )
     qb = body.get("query_body", {})
-    result = set_query_body_config(
+    query_body = set_query_body_config(
         enabled=qb.get("enabled"),
         sample_rate=qb.get("sample_rate"),
     )
-    return {"query_body": result}
+    return {"event_sampling": event_sampling, "query_body": query_body}
 
 
 @app.get("/_gateway/heat")
@@ -290,6 +297,9 @@ async def generate(req: GenerateRequest):
         else:
             errors += 1
         try:
+            if not should_sample_event():
+                metrics.inc("events_sampled_out")
+                continue
             indices, operation, field_refs = extract_from_request(
                 path=path, method=method, body=body_bytes,
             )
@@ -374,6 +384,11 @@ async def proxy_catchall(request: Request):
     # Skip events for internal operations (own usage index, ES system endpoints)
     if _should_skip_event(operation, indices):
         metrics.inc("events_skipped")
+        return response
+
+    # Step 2.5: sampling — probabilistically skip events to reduce ES load
+    if not should_sample_event():
+        metrics.inc("events_sampled_out")
         return response
 
     # Step 3+4: build and emit one event per query

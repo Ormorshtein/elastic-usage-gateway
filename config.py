@@ -16,14 +16,9 @@ Environment variables:
   METADATA_REFRESH_INTERVAL  Metadata cache refresh interval (default: 60)
   INDEX_HEAT_HOT/WARM/COLD Heat tier thresholds in ops/hour
   FIELD_HEAT_HOT/WARM/COLD Field heat thresholds as proportions
+  EVENT_SAMPLE_RATE        Fraction of requests that emit events (default: 1.0)
   QUERY_BODY_ENABLED       Store query bodies in events (default: true)
   QUERY_BODY_SAMPLE_RATE   Fraction of events to store bodies (default: 1.0)
-  SAMPLING_MAX_EVENTS_PER_SEC  Max raw events/sec at high traffic (default: 50)
-  SAMPLING_LOW_THRESHOLD   Below this rps, emit 100% (default: 50)
-  ROLLUP_INTERVAL_SECONDS  Rollup cycle interval (default: 300)
-  ROLLUP_BATCH_SIZE        Scroll batch size for rollups (default: 5000)
-  RAW_RETENTION_HOURS      Keep raw events for N hours after rollup (default: 1)
-  ROLLUP_RETENTION_DAYS    Keep rollup docs for N days (default: 90)
 """
 
 import os
@@ -33,7 +28,7 @@ ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
 
 # --- Gateway ---
 GATEWAY_HOST = os.getenv("GATEWAY_HOST", "0.0.0.0")
-GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "9201"))
+GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "9301"))
 
 # --- Usage Events ---
 USAGE_INDEX = os.getenv("USAGE_INDEX", ".usage-events")
@@ -55,16 +50,9 @@ FIELD_HEAT_HOT = float(os.getenv("FIELD_HEAT_HOT", "0.15"))
 FIELD_HEAT_WARM = float(os.getenv("FIELD_HEAT_WARM", "0.05"))
 FIELD_HEAT_COLD = float(os.getenv("FIELD_HEAT_COLD", "0.01"))
 
+# --- Event Sampling ---
+EVENT_SAMPLE_RATE = float(os.getenv("EVENT_SAMPLE_RATE", "1.0"))
+
 # --- Query Body Storage ---
 QUERY_BODY_ENABLED = os.getenv("QUERY_BODY_ENABLED", "true").lower() in ("true", "1", "yes")
 QUERY_BODY_SAMPLE_RATE = float(os.getenv("QUERY_BODY_SAMPLE_RATE", "1.0"))
-
-# --- Adaptive Sampling ---
-SAMPLING_MAX_EVENTS_PER_SEC = float(os.getenv("SAMPLING_MAX_EVENTS_PER_SEC", "50.0"))
-SAMPLING_LOW_THRESHOLD = float(os.getenv("SAMPLING_LOW_THRESHOLD", "50.0"))
-
-# --- Rollups ---
-ROLLUP_INTERVAL_SECONDS = int(os.getenv("ROLLUP_INTERVAL_SECONDS", "300"))
-ROLLUP_BATCH_SIZE = int(os.getenv("ROLLUP_BATCH_SIZE", "5000"))
-RAW_RETENTION_HOURS = float(os.getenv("RAW_RETENTION_HOURS", "1.0"))
-ROLLUP_RETENTION_DAYS = int(os.getenv("ROLLUP_RETENTION_DAYS", "90"))

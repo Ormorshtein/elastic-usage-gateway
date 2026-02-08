@@ -1,11 +1,6 @@
 """Tests for gateway.metrics — simple in-memory counters."""
 
-import time
-from unittest.mock import patch
-from datetime import datetime, timezone, timedelta
-
-from gateway.metrics import inc, inc_by, get_all, reset, observe_es_time, observe_request_time, get_requests_per_second
-import gateway.metrics as metrics_mod
+from gateway.metrics import inc, get_all, reset, observe_es_time, observe_request_time
 
 
 class TestMetrics:
@@ -46,7 +41,7 @@ class TestMetrics:
         expected_keys = {
             "requests_proxied", "requests_failed",
             "events_emitted", "events_failed", "events_skipped",
-            "extraction_errors",
+            "events_sampled_out", "extraction_errors",
             "metadata_refresh_ok", "metadata_refresh_failed",
             "startup_time", "uptime_seconds",
         }
@@ -105,47 +100,3 @@ class TestMetrics:
         stats = get_all()
         assert stats["request_time_avg_ms"] == 0.0
         assert stats["request_time_max_ms"] == 0.0
-
-    def test_inc_by(self):
-        inc_by("requests_proxied", 10)
-        inc_by("requests_proxied", 5)
-        stats = get_all()
-        assert stats["requests_proxied"] == 15
-
-    def test_inc_by_zero(self):
-        inc_by("events_emitted", 0)
-        stats = get_all()
-        assert stats["events_emitted"] == 0
-
-    def test_get_requests_per_second(self):
-        """RPS = requests_proxied / uptime."""
-        # Set startup time to 10 seconds ago
-        original = metrics_mod._startup_time
-        metrics_mod._startup_time = datetime.now(timezone.utc) - timedelta(seconds=10)
-        try:
-            reset()
-            inc_by("requests_proxied", 50)
-            rps = get_requests_per_second()
-            assert 4.0 <= rps <= 6.0  # ~5.0 rps, allow for timing jitter
-        finally:
-            metrics_mod._startup_time = original
-
-    def test_get_requests_per_second_zero_uptime(self):
-        """Returns 0 when uptime is less than 1 second."""
-        original = metrics_mod._startup_time
-        metrics_mod._startup_time = datetime.now(timezone.utc)
-        try:
-            rps = get_requests_per_second()
-            assert rps == 0.0
-        finally:
-            metrics_mod._startup_time = original
-
-    def test_new_counters_in_get_all(self):
-        """New sampling/rollup counters should be in get_all()."""
-        stats = get_all()
-        assert "events_sampled_out" in stats
-        assert "rollups_completed" in stats
-        assert "rollups_failed" in stats
-        assert stats["events_sampled_out"] == 0
-        assert stats["rollups_completed"] == 0
-        assert stats["rollups_failed"] == 0

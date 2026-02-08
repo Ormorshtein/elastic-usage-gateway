@@ -1,14 +1,9 @@
-"""Tests for gateway.events — fingerprinting, event building, and adaptive sampling."""
+"""Tests for gateway.events — fingerprinting and event building."""
 
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
 
-from gateway.events import (
-    _compute_fingerprint, build_event, get_query_body_config, set_query_body_config,
-    get_sampling_config, set_sampling_config, compute_sample_rate,
-    emit_event_background,
-)
+from gateway.events import _compute_fingerprint, build_event, get_event_sample_config, set_event_sample_config, should_sample_event, get_query_body_config, set_query_body_config
 from gateway.extractor import FieldRefs
-from gateway import metrics
 import gateway.events as events_mod
 
 
@@ -277,117 +272,49 @@ class TestQueryBodyConfig:
         assert event["query_body"] is None
 
 
-class TestBuildEventTypeAndWeight:
-    def test_includes_type_raw(self):
-        refs = FieldRefs()
-        event = build_event(
-            index_name="x", operation="search", field_refs=refs,
-            method="POST", path="/x/_search", response_status=200, elapsed_ms=0,
-        )
-        assert event["type"] == "raw"
-
-    def test_includes_sample_weight(self):
-        refs = FieldRefs()
-        event = build_event(
-            index_name="x", operation="search", field_refs=refs,
-            method="POST", path="/x/_search", response_status=200, elapsed_ms=0,
-        )
-        assert event["sample_weight"] == 1.0
-
-
-class TestSamplingConfig:
+class TestEventSampleConfig:
     def setup_method(self):
-        set_sampling_config(max_events_per_sec=50.0, low_threshold=50.0)
+        set_event_sample_config(sample_rate=1.0)
 
     def teardown_method(self):
-        set_sampling_config(max_events_per_sec=50.0, low_threshold=50.0)
+        set_event_sample_config(sample_rate=1.0)
 
-    def test_get_config_defaults(self):
-        config = get_sampling_config()
-        assert config["max_events_per_sec"] == 50.0
-        assert config["low_threshold"] == 50.0
+    def test_get_config_default(self):
+        config = get_event_sample_config()
+        assert config["sample_rate"] == 1.0
 
-    def test_set_max_events_per_sec(self):
-        result = set_sampling_config(max_events_per_sec=100.0)
-        assert result["max_events_per_sec"] == 100.0
+    def test_set_sample_rate(self):
+        result = set_event_sample_config(sample_rate=0.5)
+        assert result["sample_rate"] == 0.5
 
-    def test_set_low_threshold(self):
-        result = set_sampling_config(low_threshold=25.0)
-        assert result["low_threshold"] == 25.0
+    def test_sample_rate_clamped_high(self):
+        result = set_event_sample_config(sample_rate=2.0)
+        assert result["sample_rate"] == 1.0
 
-    def test_clamps_max_eps_minimum(self):
-        """max_events_per_sec should not go below 1.0."""
-        result = set_sampling_config(max_events_per_sec=0.1)
-        assert result["max_events_per_sec"] == 1.0
+    def test_sample_rate_clamped_low(self):
+        result = set_event_sample_config(sample_rate=-0.5)
+        assert result["sample_rate"] == 0.0
 
-    def test_clamps_low_threshold_minimum(self):
-        result = set_sampling_config(low_threshold=0.5)
-        assert result["low_threshold"] == 1.0
+    def test_should_sample_at_full_rate(self):
+        set_event_sample_config(sample_rate=1.0)
+        assert should_sample_event() is True
 
+    def test_should_not_sample_at_zero(self):
+        set_event_sample_config(sample_rate=0.0)
+        assert should_sample_event() is False
 
-class TestComputeSampleRate:
-    def setup_method(self):
-        metrics.reset()
-        set_sampling_config(max_events_per_sec=50.0, low_threshold=50.0)
+    @patch.object(events_mod._random, "random", return_value=0.3)
+    def test_should_sample_when_under_rate(self, mock_rand):
+        set_event_sample_config(sample_rate=0.5)
+        assert should_sample_event() is True
 
-    def teardown_method(self):
-        set_sampling_config(max_events_per_sec=50.0, low_threshold=50.0)
-
-    @patch("gateway.events.metrics.get_requests_per_second", return_value=10.0)
-    def test_below_threshold_returns_one(self, mock_rps):
-        assert compute_sample_rate() == 1.0
-
-    @patch("gateway.events.metrics.get_requests_per_second", return_value=50.0)
-    def test_at_threshold_returns_one(self, mock_rps):
-        assert compute_sample_rate() == 1.0
-
-    @patch("gateway.events.metrics.get_requests_per_second", return_value=200.0)
-    def test_above_threshold_returns_fraction(self, mock_rps):
-        set_sampling_config(max_events_per_sec=50.0, low_threshold=50.0)
-        rate = compute_sample_rate()
-        assert rate == 50.0 / 200.0  # 0.25
-
-    @patch("gateway.events.metrics.get_requests_per_second", return_value=1000.0)
-    def test_high_traffic_returns_small_rate(self, mock_rps):
-        rate = compute_sample_rate()
-        assert rate == 50.0 / 1000.0  # 0.05
-
-    @patch("gateway.events.metrics.get_requests_per_second", return_value=0.0)
-    def test_zero_rps_returns_one(self, mock_rps):
-        assert compute_sample_rate() == 1.0
-
-
-class TestEmitEventBackgroundSampling:
-    def setup_method(self):
-        metrics.reset()
-        set_sampling_config(max_events_per_sec=50.0, low_threshold=50.0)
-
-    def teardown_method(self):
-        set_sampling_config(max_events_per_sec=50.0, low_threshold=50.0)
-
-    @patch("gateway.events.compute_sample_rate", return_value=0.5)
     @patch.object(events_mod._random, "random", return_value=0.8)
-    def test_event_skipped_when_not_sampled(self, mock_rand, mock_rate):
-        """When random() >= rate, event should be skipped."""
-        event = {"type": "raw", "sample_weight": 1.0}
-        emit_event_background(event)
-        stats = metrics.get_all()
-        assert stats["events_sampled_out"] == 1
+    def test_should_not_sample_when_over_rate(self, mock_rand):
+        set_event_sample_config(sample_rate=0.5)
+        assert should_sample_event() is False
 
-    @patch("gateway.events.compute_sample_rate", return_value=0.5)
-    @patch.object(events_mod._random, "random", return_value=0.2)
-    def test_sample_weight_updated_when_sampled(self, mock_rand, mock_rate):
-        """When sampled, weight should be 1/rate."""
-        event = {"type": "raw", "sample_weight": 1.0}
-        # No event loop running, so the emit will silently fail but event dict is mutated
-        emit_event_background(event)
-        assert event["sample_weight"] == round(1.0 / 0.5, 4)  # 2.0
-
-    @patch("gateway.events.compute_sample_rate", return_value=1.0)
-    def test_no_sampling_at_full_rate(self, mock_rate):
-        """At rate=1.0, sample_weight should stay 1.0 (no sampling applied)."""
-        event = {"type": "raw", "sample_weight": 1.0}
-        emit_event_background(event)
-        assert event["sample_weight"] == 1.0
-        stats = metrics.get_all()
-        assert stats["events_sampled_out"] == 0
+    @patch.object(events_mod._random, "random", return_value=0.5)
+    def test_should_not_sample_at_boundary(self, mock_rand):
+        """random() == sample_rate should be excluded (strict < comparison)."""
+        set_event_sample_config(sample_rate=0.5)
+        assert should_sample_event() is False

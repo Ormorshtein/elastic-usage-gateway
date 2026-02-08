@@ -24,22 +24,40 @@ from datetime import datetime, timezone
 
 import httpx
 
-from config import (
-    ES_HOST, USAGE_INDEX, CLUSTER_ID, QUERY_BODY_ENABLED, QUERY_BODY_SAMPLE_RATE,
-    EVENT_TIMEOUT, SAMPLING_MAX_EVENTS_PER_SEC, SAMPLING_LOW_THRESHOLD,
-)
+from config import ES_HOST, USAGE_INDEX, CLUSTER_ID, EVENT_SAMPLE_RATE, QUERY_BODY_ENABLED, QUERY_BODY_SAMPLE_RATE, EVENT_TIMEOUT
 from gateway.extractor import FieldRefs
 from gateway import metrics
 
 logger = logging.getLogger(__name__)
 
+# Runtime-configurable event sampling
+_event_sample_rate: float = EVENT_SAMPLE_RATE
+
 # Runtime-configurable query body storage
 _query_body_enabled: bool = QUERY_BODY_ENABLED
 _query_body_sample_rate: float = QUERY_BODY_SAMPLE_RATE
 
-# Runtime-configurable adaptive sampling
-_sampling_max_eps: float = SAMPLING_MAX_EVENTS_PER_SEC
-_sampling_low_threshold: float = SAMPLING_LOW_THRESHOLD
+
+def get_event_sample_config() -> dict:
+    """Return current event sampling configuration."""
+    return {"sample_rate": _event_sample_rate}
+
+
+def set_event_sample_config(sample_rate: float | None = None) -> dict:
+    """Update event sampling configuration at runtime."""
+    global _event_sample_rate
+    if sample_rate is not None:
+        _event_sample_rate = max(0.0, min(1.0, sample_rate))
+    return get_event_sample_config()
+
+
+def should_sample_event() -> bool:
+    """Return True if this event should be emitted based on the sample rate."""
+    if _event_sample_rate >= 1.0:
+        return True
+    if _event_sample_rate <= 0.0:
+        return False
+    return _random.random() < _event_sample_rate
 
 
 def get_query_body_config() -> dict:
@@ -55,34 +73,6 @@ def set_query_body_config(enabled: bool | None = None, sample_rate: float | None
     if sample_rate is not None:
         _query_body_sample_rate = max(0.0, min(1.0, sample_rate))
     return get_query_body_config()
-
-
-def get_sampling_config() -> dict:
-    """Return current adaptive sampling configuration."""
-    return {"max_events_per_sec": _sampling_max_eps, "low_threshold": _sampling_low_threshold}
-
-
-def set_sampling_config(max_events_per_sec: float | None = None, low_threshold: float | None = None) -> dict:
-    """Update adaptive sampling configuration at runtime."""
-    global _sampling_max_eps, _sampling_low_threshold
-    if max_events_per_sec is not None:
-        _sampling_max_eps = max(1.0, max_events_per_sec)
-    if low_threshold is not None:
-        _sampling_low_threshold = max(1.0, low_threshold)
-    return get_sampling_config()
-
-
-def compute_sample_rate() -> float:
-    """Compute the current sample rate based on request throughput.
-
-    Returns 1.0 (emit all) when rps is below the low threshold.
-    Above the threshold, caps event rate at max_events_per_sec.
-    """
-    rps = metrics.get_requests_per_second()
-    if rps <= _sampling_low_threshold:
-        return 1.0
-    return min(1.0, _sampling_max_eps / max(rps, 0.01))
-
 
 # Dedicated client for writing usage events — separate from the proxy client
 # to avoid contention.
@@ -118,16 +108,6 @@ USAGE_INDEX_MAPPING = {
             "lookback_field":    {"type": "keyword"},
             "lookback_label":    {"type": "keyword"},
             "query_body":        {"type": "keyword", "index": False, "doc_values": False, "ignore_above": 4096},
-            "type":              {"type": "keyword"},
-            "sample_weight":     {"type": "float"},
-            "window_start":      {"type": "date"},
-            "window_end":        {"type": "date"},
-            "total_operations":  {"type": "float"},
-            "field_usage":       {"type": "object", "enabled": False},
-            "lookback_sum_seconds":  {"type": "float"},
-            "lookback_max_seconds":  {"type": "float"},
-            "lookback_count":        {"type": "integer"},
-            "avg_response_time_ms":  {"type": "float"},
         }
     },
     "settings": {
@@ -156,37 +136,6 @@ async def ensure_usage_index() -> None:
             )
     except httpx.RequestError as exc:
         logger.warning("Could not ensure usage index exists: %s", exc)
-
-
-async def update_mapping() -> None:
-    """Add new fields to an existing usage-events index mapping.
-
-    Safe to call on every startup — ES allows adding new fields to an
-    existing mapping without affecting existing documents.
-    """
-    new_fields = {
-        "type":              {"type": "keyword"},
-        "sample_weight":     {"type": "float"},
-        "window_start":      {"type": "date"},
-        "window_end":        {"type": "date"},
-        "total_operations":  {"type": "float"},
-        "field_usage":       {"type": "object", "enabled": False},
-        "lookback_sum_seconds":  {"type": "float"},
-        "lookback_max_seconds":  {"type": "float"},
-        "lookback_count":        {"type": "integer"},
-        "avg_response_time_ms":  {"type": "float"},
-    }
-    try:
-        resp = await _event_client.put(
-            f"/{USAGE_INDEX}/_mapping",
-            json={"properties": new_fields},
-        )
-        if resp.status_code == 200:
-            logger.info("Updated usage index mapping with new fields")
-        else:
-            logger.warning("Failed to update mapping: %s %s", resp.status_code, resp.text[:200])
-    except httpx.RequestError as exc:
-        logger.warning("Could not update usage index mapping: %s", exc)
 
 
 def _compute_fingerprint(body: bytes) -> str | None:
@@ -218,8 +167,6 @@ def build_event(
     idx = index_name or "_unknown"
     lookback = field_refs.lookback
     return {
-        "type": "raw",
-        "sample_weight": 1.0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "cluster_id": CLUSTER_ID,
         "index": idx,
@@ -269,18 +216,7 @@ async def emit_event(event: dict) -> None:
 
 
 def emit_event_background(event: dict) -> None:
-    """Schedule event emission as a fire-and-forget background task.
-
-    Applies adaptive sampling: when request rate exceeds the low threshold,
-    only a fraction of events are emitted, with sample_weight adjusted to
-    compensate for dropped events (so rollup aggregation stays unbiased).
-    """
-    rate = compute_sample_rate()
-    if rate < 1.0:
-        if _random.random() >= rate:
-            metrics.inc("events_sampled_out")
-            return
-        event["sample_weight"] = round(1.0 / rate, 4)
+    """Schedule event emission as a fire-and-forget background task."""
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(emit_event(event))

@@ -164,20 +164,30 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="stat-box"><div class="stat-label">Events emitted</div><div class="stat-value" id="st-events-emitted">-</div></div>
     <div class="stat-box"><div class="stat-label">Events failed</div><div class="stat-value" id="st-events-failed">-</div></div>
     <div class="stat-box"><div class="stat-label">Events skipped</div><div class="stat-value" id="st-events-skipped">-</div></div>
+    <div class="stat-box"><div class="stat-label">Events sampled out</div><div class="stat-value" id="st-events-sampled-out">-</div></div>
     <div class="stat-box"><div class="stat-label">Extraction errors</div><div class="stat-value" id="st-extraction-errors">-</div></div>
     <div class="stat-box"><div class="stat-label">Metadata refreshes</div><div class="stat-value" id="st-metadata-refresh-ok">-</div></div>
     <div class="stat-box"><div class="stat-label">Metadata failures</div><div class="stat-value" id="st-metadata-refresh-failed">-</div></div>
-    <div class="stat-box"><div class="stat-label">Sampled out</div><div class="stat-value" id="st-events-sampled-out">-</div></div>
     <div class="stat-box"><div class="stat-label">ES avg response</div><div class="stat-value" id="st-es-time-avg">-</div></div>
     <div class="stat-box"><div class="stat-label">ES max response</div><div class="stat-value" id="st-es-time-max">-</div></div>
     <div class="stat-box"><div class="stat-label">Avg request time</div><div class="stat-value" id="st-request-time-avg">-</div></div>
     <div class="stat-box"><div class="stat-label">Max request time</div><div class="stat-value" id="st-request-time-max">-</div></div>
-    <div class="stat-box"><div class="stat-label">Rollups completed</div><div class="stat-value" id="st-rollups-completed">-</div></div>
-    <div class="stat-box"><div class="stat-label">Rollups failed</div><div class="stat-value" id="st-rollups-failed">-</div></div>
     <div class="stat-box"><div class="stat-label">Uptime</div><div class="stat-value" id="st-uptime">-</div></div>
     <div class="stat-box"><div class="stat-label">Index groups</div><div class="stat-value" id="st-groups">-</div></div>
   </div>
   <div class="refresh-hint">Auto-refreshes every 5 seconds</div>
+</div>
+
+<div class="card">
+  <h2>Event Sampling</h2>
+  <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+    <label style="font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px;">
+      Sample rate:
+      <input type="range" id="es-rate" min="0" max="100" value="100" style="width:160px; accent-color:#4f8ff7;" oninput="document.getElementById('es-rate-val').textContent=this.value+'%'; updateESConfig()">
+      <span id="es-rate-val" style="font-size:14px; font-weight:600; color:#4f8ff7; width:40px;">100%</span>
+    </label>
+    <span style="font-size:12px; color:#666;">Controls what fraction of proxied requests emit usage events</span>
+  </div>
 </div>
 
 <div class="card">
@@ -192,44 +202,6 @@ HTML_PAGE = """<!DOCTYPE html>
       <input type="range" id="qb-rate" min="0" max="100" value="100" style="width:120px; accent-color:#4f8ff7;" oninput="document.getElementById('qb-rate-val').textContent=this.value+'%'; updateQBConfig()">
       <span id="qb-rate-val" style="font-size:14px; font-weight:600; color:#4f8ff7; width:40px;">100%</span>
     </label>
-  </div>
-</div>
-
-<div class="card">
-  <h2>Event Sampling</h2>
-  <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:12px;">
-    <label style="font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px;">
-      Max events/sec:
-      <input type="range" id="samp-max-eps" min="1" max="500" value="50" style="width:140px; accent-color:#4f8ff7;" oninput="document.getElementById('samp-max-eps-val').textContent=this.value; updateSamplingConfig()">
-      <span id="samp-max-eps-val" style="font-size:14px; font-weight:600; color:#4f8ff7; width:36px;">50</span>
-    </label>
-  </div>
-  <div style="font-size:13px; color:#888;">
-    Effective sample rate: <span id="samp-effective-rate" style="color:#4f8ff7; font-weight:600;">100%</span>
-    &nbsp;&mdash;&nbsp; Events sampled out: <span id="samp-sampled-out" style="color:#f0ad4e; font-weight:600;">0</span>
-  </div>
-</div>
-
-<div class="card">
-  <h2>Rollups</h2>
-  <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:12px;">
-    <label style="font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px;">
-      Interval (sec):
-      <input type="range" id="rollup-interval" min="60" max="600" value="300" step="30" style="width:140px; accent-color:#4f8ff7;" oninput="document.getElementById('rollup-interval-val').textContent=this.value; updateRollupConfig()">
-      <span id="rollup-interval-val" style="font-size:14px; font-weight:600; color:#4f8ff7; width:36px;">300</span>
-    </label>
-    <label style="font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px;">
-      Raw retention (h):
-      <input type="number" id="rollup-retention-raw" value="1" min="0.5" max="48" step="0.5" style="width:70px; padding:4px 8px; border-radius:6px; border:1px solid #3a3d47; background:#0f1117; color:#fff; font-size:13px;" onchange="updateRollupConfig()">
-    </label>
-    <label style="font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px;">
-      Rollup retention (days):
-      <input type="number" id="rollup-retention-days" value="90" min="1" max="365" step="1" style="width:70px; padding:4px 8px; border-radius:6px; border:1px solid #3a3d47; background:#0f1117; color:#fff; font-size:13px;" onchange="updateRollupConfig()">
-    </label>
-  </div>
-  <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-    <button class="btn-run" id="btn-rollup-now" onclick="triggerRollup()" style="padding:8px 16px; font-size:13px;">Run Rollup Now</button>
-    <span id="rollup-status" style="font-size:13px; color:#888;"></span>
   </div>
 </div>
 
@@ -540,12 +512,10 @@ async function refreshStats() {
     set('st-events-emitted', data.events_emitted || 0);
     set('st-events-failed', data.events_failed || 0, true);
     set('st-events-skipped', data.events_skipped || 0);
+    set('st-events-sampled-out', data.events_sampled_out || 0);
     set('st-extraction-errors', data.extraction_errors || 0, true);
     set('st-metadata-refresh-ok', data.metadata_refresh_ok || 0);
     set('st-metadata-refresh-failed', data.metadata_refresh_failed || 0, true);
-    set('st-events-sampled-out', data.events_sampled_out || 0);
-    set('st-rollups-completed', data.rollups_completed || 0);
-    set('st-rollups-failed', data.rollups_failed || 0, true);
     set('st-es-time-avg', (data.es_time_avg_ms || 0) + 'ms');
     set('st-es-time-max', (data.es_time_max_ms || 0) + 'ms');
     set('st-request-time-avg', (data.request_time_avg_ms || 0) + 'ms');
@@ -558,18 +528,39 @@ async function refreshStats() {
   }
 }
 
-async function loadQBConfig() {
+async function loadConfig() {
   try {
     const resp = await fetch('/_gateway/config');
     const data = await resp.json();
+    const es = data.event_sampling || {};
+    const esPct = Math.round((es.sample_rate || 0) * 100);
+    document.getElementById('es-rate').value = esPct;
+    document.getElementById('es-rate-val').textContent = esPct + '%';
     const qb = data.query_body || {};
     document.getElementById('qb-enabled').checked = qb.enabled !== false;
     const pct = Math.round((qb.sample_rate || 0) * 100);
     document.getElementById('qb-rate').value = pct;
     document.getElementById('qb-rate-val').textContent = pct + '%';
   } catch (e) {
-    console.warn('Failed to load query body config:', e);
+    console.warn('Failed to load config:', e);
   }
+}
+
+let _esTimer = null;
+function updateESConfig() {
+  clearTimeout(_esTimer);
+  _esTimer = setTimeout(async () => {
+    const rate = parseInt(document.getElementById('es-rate').value) / 100;
+    try {
+      await fetch('/_gateway/config', {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ event_sampling: { sample_rate: rate } })
+      });
+    } catch (e) {
+      console.warn('Failed to update event sampling config:', e);
+    }
+  }, 300);
 }
 
 let _qbTimer = null;
@@ -590,127 +581,14 @@ function updateQBConfig() {
   }, 300);
 }
 
-/* ==================== SAMPLING CONFIG ==================== */
-
-async function loadSamplingConfig() {
-  try {
-    const resp = await fetch('/_gateway/config');
-    const data = await resp.json();
-    const samp = data.sampling || {};
-    const maxEps = Math.round(samp.max_events_per_sec || 50);
-    document.getElementById('samp-max-eps').value = maxEps;
-    document.getElementById('samp-max-eps-val').textContent = maxEps;
-    const rate = samp.effective_rate != null ? samp.effective_rate : 1.0;
-    document.getElementById('samp-effective-rate').textContent = Math.round(rate * 100) + '%';
-  } catch (e) {
-    console.warn('Failed to load sampling config:', e);
-  }
-}
-
-let _sampTimer = null;
-function updateSamplingConfig() {
-  clearTimeout(_sampTimer);
-  _sampTimer = setTimeout(async () => {
-    const maxEps = parseInt(document.getElementById('samp-max-eps').value);
-    try {
-      const resp = await fetch('/_gateway/config', {
-        method: 'PATCH',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ sampling: { max_events_per_sec: maxEps } })
-      });
-      const data = await resp.json();
-      // Refresh effective rate from next stats poll
-    } catch (e) {
-      console.warn('Failed to update sampling config:', e);
-    }
-  }, 300);
-}
-
-async function refreshSamplingRate() {
-  try {
-    const resp = await fetch('/_gateway/config');
-    const data = await resp.json();
-    const samp = data.sampling || {};
-    const rate = samp.effective_rate != null ? samp.effective_rate : 1.0;
-    document.getElementById('samp-effective-rate').textContent = Math.round(rate * 100) + '%';
-
-    const resp2 = await fetch('/_gateway/stats');
-    const stats = await resp2.json();
-    document.getElementById('samp-sampled-out').textContent = (stats.events_sampled_out || 0).toLocaleString();
-  } catch (e) {}
-}
-
-/* ==================== ROLLUP CONFIG ==================== */
-
-async function loadRollupConfig() {
-  try {
-    const resp = await fetch('/_gateway/config');
-    const data = await resp.json();
-    const r = data.rollup || {};
-    document.getElementById('rollup-interval').value = r.interval_seconds || 300;
-    document.getElementById('rollup-interval-val').textContent = r.interval_seconds || 300;
-    document.getElementById('rollup-retention-raw').value = r.raw_retention_hours || 1;
-    document.getElementById('rollup-retention-days').value = r.rollup_retention_days || 90;
-  } catch (e) {
-    console.warn('Failed to load rollup config:', e);
-  }
-}
-
-let _rollupTimer = null;
-function updateRollupConfig() {
-  clearTimeout(_rollupTimer);
-  _rollupTimer = setTimeout(async () => {
-    const interval = parseInt(document.getElementById('rollup-interval').value);
-    const rawHours = parseFloat(document.getElementById('rollup-retention-raw').value);
-    const rollupDays = parseInt(document.getElementById('rollup-retention-days').value);
-    try {
-      await fetch('/_gateway/config', {
-        method: 'PATCH',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ rollup: { interval_seconds: interval, raw_retention_hours: rawHours, rollup_retention_days: rollupDays } })
-      });
-    } catch (e) {
-      console.warn('Failed to update rollup config:', e);
-    }
-  }, 300);
-}
-
-async function triggerRollup() {
-  const btn = document.getElementById('btn-rollup-now');
-  const status = document.getElementById('rollup-status');
-  btn.disabled = true;
-  status.textContent = 'Running rollup...';
-  status.style.color = '#7ab8f5';
-  try {
-    const resp = await fetch('/_gateway/rollup', { method: 'POST' });
-    const data = await resp.json();
-    if (data.status === 'ok') {
-      status.textContent = 'Read ' + (data.events_read || 0) + ' events, wrote ' + (data.rollups_written || 0) + ' rollups, deleted ' + (data.raw_deleted || 0) + ' raw';
-      status.style.color = '#6fcf6f';
-    } else if (data.status === 'skipped') {
-      status.textContent = 'Skipped: ' + (data.reason || 'unknown');
-      status.style.color = '#f0ad4e';
-    } else {
-      status.textContent = 'Error: ' + JSON.stringify(data);
-      status.style.color = '#cf6f6f';
-    }
-  } catch (e) {
-    status.textContent = 'Error: ' + e.message;
-    status.style.color = '#cf6f6f';
-  }
-  btn.disabled = false;
-}
-
 /* ==================== INIT ==================== */
 
 loadScenarios();
-loadQBConfig();
-loadSamplingConfig();
-loadRollupConfig();
+loadConfig();
 refreshStats();
 
 // Auto-refresh stats every 5 seconds
-setInterval(() => { refreshStats(); refreshSamplingRate(); }, 5000);
+setInterval(refreshStats, 5000);
 </script>
 </body>
 </html>
