@@ -125,12 +125,13 @@ Every usage event contains two index-related fields: `index` (raw) and `index_gr
 
 ## Quick Start
 
-### 1. Start Elasticsearch
+### 1. Start Elasticsearch & Kibana
 
 ```bash
 docker-compose up -d
 # Wait for ES to be healthy
 curl http://localhost:9200/_cluster/health
+# Kibana available at http://localhost:5601
 ```
 
 ### 2. Install Dependencies
@@ -144,6 +145,11 @@ pip install -r requirements.txt
 ```bash
 python -m gateway.main
 # Gateway listens on port 9301, proxies to ES on port 9200
+```
+
+To restart the gateway after code changes:
+```bash
+restart-gateway.bat
 ```
 
 ### 4. Seed Sample Data
@@ -160,11 +166,19 @@ python -m generator.generate --duration 60 --rps 10
 # Sends 600 queries with intentionally skewed field usage
 ```
 
-### 6. View Heat Report
+### 6. Import Kibana Dashboards
+
+```bash
+python kibana_setup.py --no-wait
+```
+
+### 7. View Heat Report
 
 ```bash
 curl http://localhost:9301/_gateway/heat | python -m json.tool
 ```
+
+You can also view visual reports in **Kibana** — open [http://localhost:5601](http://localhost:5601) in your browser and navigate to **Dashboards** to see the pre-built usage and heat dashboards.
 
 ## Expected Results
 

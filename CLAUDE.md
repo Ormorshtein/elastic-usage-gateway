@@ -17,6 +17,7 @@ docker compose up -d                    # Start ES + Kibana
 python -m generator.seed                # Seed products index (once)
 python -m gateway.main                  # Start gateway on :9301
 python kibana_setup.py --no-wait        # Import Kibana dashboards
+restart-gateway.bat                     # Kill + restart gateway (Windows)
 ```
 
 ## Project Structure
@@ -33,6 +34,7 @@ generator/generate.py — CLI traffic generator
 generator/queries.py  — Query templates with weighted distribution
 kibana_setup.py       — Programmatic Kibana dashboard/visualization setup
 config.py             — ES host, gateway port, index names
+restart-gateway.bat   — Kill + restart gateway process (Windows)
 ```
 
 ## Code Conventions
