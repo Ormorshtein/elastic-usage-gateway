@@ -67,6 +67,7 @@ class TestResolveGroup:
         assert resolve_group("anything") == "anything"
 
 
+
 class TestGetGroups:
     def setup_method(self):
         _set_metadata(

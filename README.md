@@ -92,6 +92,37 @@ In production, high-traffic clusters can generate a large volume of usage events
 - **Field heat is unaffected** by sampling — heat scores are proportions (ratios), so both numerator and denominator scale equally
 - Index heat (ops/hour) will be proportionally lower, but relative rankings between indices are preserved
 
+### Index and Index Group Resolution
+
+Every usage event contains two index-related fields: `index` (raw) and `index_group` (logical).
+
+**`index`** is extracted from the URL path by `parse_path()` in `extractor.py` — it's whatever the client targeted:
+
+| Request path | `index` |
+|---|---|
+| `/orders/_search` | `orders` (the alias) |
+| `/orders-us/_doc/1` | `orders-us` (concrete) |
+| `/logs-2026.02.06/_bulk` | `logs-2026.02.06` (concrete) |
+| `/products/_search` | `products` (alias = concrete) |
+| `/_bulk` | `None` (system endpoint) |
+
+**`index_group`** is resolved by `resolve_group()` in `metadata.py` using a cache of ES alias and data stream mappings (refreshed every 60s from `GET /_aliases` and `GET /_data_stream/*`):
+
+1. **Concrete index lookup**: If the name is a known concrete index, return its alias/data stream group.
+2. **Group name match**: If the name is itself a known group (alias queried directly), return it.
+3. **Fallback**: Return the name as-is (unknown index, or metadata not yet loaded).
+
+| `index` | Resolution path | `index_group` |
+|---|---|---|
+| `orders-us` | Concrete → alias `orders` | `orders` |
+| `orders-eu` | Concrete → alias `orders` | `orders` |
+| `orders` | Is a group name → itself | `orders` |
+| `logs-2026.02.06` | Concrete → alias `logs` | `logs` |
+| `products` | Concrete → alias `products` (self) | `products` |
+| `mystery` | Not found → fallback | `mystery` |
+
+**Why dashboards aggregate on `index_group`, not `index`**: Read queries target aliases (`/orders/_search`), while writes target concrete indices (`/orders-us/_doc/1`). If dashboards aggregated on `index`, reads and writes would appear as separate buckets. The `index_group` gives a consistent view where all operations on the same logical index contribute to the same bucket. The raw `index` field is preserved in events for debugging in Discover.
+
 ## Quick Start
 
 ### 1. Start Elasticsearch
