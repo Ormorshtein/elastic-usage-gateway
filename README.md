@@ -170,15 +170,25 @@ You can generate traffic in two ways:
 
 **Option A — Via the UI** (recommended): Open the gateway control panel at [http://localhost:9301/_gateway/ui](http://localhost:9301/_gateway/ui). Use the Generator tab to select a scenario, adjust query weights, and click **Run Scenario** or **Run All Scenarios**.
 
+![Generator — scenario selection and weight sliders](docs/generator.jpg)
+
 **Option B — Via CLI**:
 ```bash
 python -m generator.generate --duration 60 --rps 10
 ```
 
 After generating traffic, view the results:
+
 - **Kibana dashboards**: Open [http://localhost:5601](http://localhost:5601) and navigate to **Dashboards** to see the pre-built usage and heat visualizations.
+
+![Kibana dashboard — index groups, operations over time, top fields by category](docs/dashboard1.jpg)
+
+![Kibana dashboard — sorted/fetched fields, lookback windows, raw events](docs/dashboard2.jpg)
+
 - **Heat report API**: `curl http://localhost:9301/_gateway/heat | python -m json.tool`
-- **Gateway monitor**: Switch to the **Monitor** tab in the UI to see live stats.
+- **Gateway monitor**: Switch to the **Monitor** tab in the UI to see live stats, grouped by proxy, events, performance, and system.
+
+![Monitor — grouped metrics with reset button](docs/monitor.jpg)
 
 ## Configuration
 
