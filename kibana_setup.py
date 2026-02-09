@@ -78,7 +78,8 @@ def create_data_view(base_url: str, title: str, name: str, dv_id: str, time_fiel
 
 # --- Visualization helper ---
 
-def _vis(vis_id, title, vis_type, vis_state_params, aggs, index_pattern_id):
+def _vis(vis_id, title, vis_type, vis_state_params, aggs, index_pattern_id,
+         search_query=""):
     """Build a classic Kibana visualization saved object."""
     return {
         "id": vis_id,
@@ -94,7 +95,7 @@ def _vis(vis_id, title, vis_type, vis_state_params, aggs, index_pattern_id):
             "kibanaSavedObjectMeta": {
                 "searchSourceJSON": json.dumps({
                     "index": index_pattern_id,
-                    "query": {"query": "", "language": "kuery"},
+                    "query": {"query": search_query, "language": "kuery"},
                     "filter": [],
                 })
             },
@@ -112,7 +113,7 @@ TABLE_PARAMS = {
     "showMetricsAtAllLevels": False, "showTotal": True,
     "totalFunc": "sum", "percentageCol": "Count", "row": True,
 }
-
+  
 AREA_AXES = {
     "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "bottom",
                       "show": True, "style": {}, "scale": {"type": "linear"},
@@ -132,6 +133,52 @@ LINE_AXES = {
                    "labels": {"show": True, "rotate": 0, "filter": False, "truncate": 100},
                    "title": {"text": "ms"}}],
 }
+
+
+# KQL filter to exclude rollup and meta docs from usage visualizations.
+# Rollup docs (type:rollup) have a different schema (field_usage instead of
+# fields.*) and would pollute counts.  Meta docs (type:_meta) are internal.
+_RAW_EVENTS_ONLY = "NOT type:rollup AND NOT type:_meta"
+
+
+def _control_group_input(data_view_id: str) -> tuple[dict, list[dict]]:
+    """Build a Kibana 8 native controlGroupInput for index_group filtering.
+
+    Returns (controlGroupInput dict, extra references list).
+    """
+    panels = {
+        "0": {
+            "type": "optionsListControl",
+            "order": 0,
+            "width": "medium",
+            "grow": True,
+            "explicitInput": {
+                "id": "0",
+                "fieldName": "index_group",
+                "title": "Index Group",
+                "selectedOptions": [],
+                "enhancements": {},
+                "singleSelect": False,
+                "searchTechnique": "prefix",
+            },
+        },
+    }
+    control_input = {
+        "chainingSystem": "HIERARCHICAL",
+        "controlStyle": "oneLine",
+        "showApplySelections": False,
+        "ignoreParentSettingsJSON": json.dumps({
+            "ignoreFilters": False,
+            "ignoreQuery": False,
+            "ignoreTimerange": False,
+            "ignoreValidations": False,
+        }),
+        "panelsJSON": json.dumps(panels),
+    }
+    refs = [
+        {"name": "controlGroup_0:optionsListDataView", "type": "index-pattern", "id": data_view_id},
+    ]
+    return control_input, refs
 
 
 def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, orders_dv_id: str) -> list[dict]:
@@ -170,44 +217,15 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     # USAGE & HEAT VISUALIZATIONS
     # =========================================================
 
-    # Index Group filter control (dropdown)
+    # Index Groups table (all queries contribute to their group's count)
     objects.append(_vis(
-        "vis-index-group-filter", "Index Group Filter", "input_control_vis",
-        {
-            "controls": [
-                {
-                    "id": "1",
-                    "fieldName": "index_group",
-                    "label": "Index Group",
-                    "type": "list",
-                    "options": {
-                        "type": "terms",
-                        "multiselect": True,
-                        "dynamicOptions": True,
-                        "size": 20,
-                        "order": "desc",
-                    },
-                    "parent": "",
-                    "indexPattern": usage_dv_id,
-                },
-            ],
-            "updateFiltersOnChange": True,
-            "useTimeFilter": True,
-            "pinFilters": False,
-        },
-        [],  # no aggs for input_control_vis
-        usage_dv_id,
-    ))
-
-    # Concrete Indices table (shows individual indices within the filtered group)
-    objects.append(_vis(
-        "vis-concrete-indices", "Concrete Indices", "table", TABLE_PARAMS,
+        "vis-concrete-indices", "Index Groups", "table", TABLE_PARAMS,
         [
             {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
-            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index", "size": 50, "order": "desc", "orderBy": "1"}, "schema": "bucket"},
-            {"id": "3", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "bucket"},
+            {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "bucket"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
     # Operations over time (area chart)
@@ -224,6 +242,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             {"id": "2", "enabled": True, "type": "date_histogram", "params": {"field": "timestamp", "useNormalizedEsInterval": True, "scaleMetricValues": False, "interval": "auto", "drop_partials": False, "min_doc_count": 1, "extended_bounds": {}}, "schema": "segment"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
     # Query type distribution (pie)
@@ -236,6 +255,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             {"id": "2", "enabled": True, "type": "terms", "params": {"field": "operation", "size": 10, "order": "desc", "orderBy": "1"}, "schema": "segment"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
     # Field heat tables
@@ -254,6 +274,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
                 {"id": "2", "enabled": True, "type": "terms", "params": {"field": field_cat, "size": 20, "order": "desc", "orderBy": "1"}, "schema": "bucket"},
             ],
             usage_dv_id,
+            search_query=_RAW_EVENTS_ONLY,
         ))
 
     # =========================================================
@@ -284,6 +305,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             {"id": "2", "enabled": True, "type": "terms", "params": {"field": "lookback_label", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
     # Avg Lookback by Group — horizontal bar showing avg lookback per index_group
@@ -307,6 +329,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
     # Lookback Date Fields — pie chart showing which date fields are used for time filtering
@@ -319,6 +342,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             {"id": "2", "enabled": True, "type": "terms", "params": {"field": "lookback_field", "size": 10, "order": "desc", "orderBy": "1"}, "schema": "segment"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
     # =========================================================
@@ -334,7 +358,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             "kibanaSavedObjectMeta": {
                 "searchSourceJSON": json.dumps({
                     "index": usage_dv_id,
-                    "query": {"query": "", "language": "kuery"},
+                    "query": {"query": _RAW_EVENTS_ONLY, "language": "kuery"},
                     "filter": [],
                     "highlightAll": True,
                     "version": True,
@@ -360,6 +384,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             {"id": "2", "enabled": True, "type": "date_histogram", "params": {"field": "timestamp", "useNormalizedEsInterval": True, "scaleMetricValues": False, "interval": "auto", "drop_partials": False, "min_doc_count": 1, "extended_bounds": {}}, "schema": "segment"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
     # =========================================================
@@ -387,6 +412,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
     # Operations Over Time by Index Group (area, split by index_group)
@@ -404,6 +430,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             {"id": "3", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 10, "order": "desc", "orderBy": "1"}, "schema": "group"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
     # Operations by Index Group + Operation (horizontal bar, split)
@@ -428,6 +455,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             {"id": "3", "enabled": True, "type": "terms", "params": {"field": "operation", "size": 10, "order": "desc", "orderBy": "1"}, "schema": "group"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
     # Avg Response Time by Index Group (horizontal bar)
@@ -451,17 +479,19 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "segment"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
-    # Concrete Indices drill-down for multi-index (shows concrete index within groups)
+    # Index Group breakdown for multi-index comparison
     objects.append(_vis(
-        "vis-concrete-indices-comparison", "Concrete Indices Breakdown", "table", TABLE_PARAMS,
+        "vis-concrete-indices-comparison", "Index Group Breakdown", "table", TABLE_PARAMS,
         [
             {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
             {"id": "2", "enabled": True, "type": "terms", "params": {"field": "index_group", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "bucket"},
-            {"id": "3", "enabled": True, "type": "terms", "params": {"field": "index", "size": 50, "order": "desc", "orderBy": "1"}, "schema": "bucket"},
+            {"id": "3", "enabled": True, "type": "terms", "params": {"field": "operation", "size": 20, "order": "desc", "orderBy": "1"}, "schema": "bucket"},
         ],
         usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
     ))
 
     # =========================================================
@@ -503,49 +533,49 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "references": products_refs,
     })
 
-    # Usage & Heat dashboard (with index_group filter at top)
+    # Usage & Heat dashboard (with native index_group control at top)
+    control_input, control_refs = _control_group_input(usage_dv_id)
     usage_panels = [
-        panel_ref(0,  "vis-index-group-filter",    0,  0, 48,  5),   # filter control at top, full width
-        panel_ref(1,  "vis-concrete-indices",       0,  5, 18, 12),   # concrete indices table
-        panel_ref(2,  "vis-ops-over-time",         18,  5, 18, 12),   # ops over time
-        panel_ref(3,  "vis-query-types",           36,  5, 12, 12),   # query type pie
-        panel_ref(4,  "vis-top-queried",            0, 17, 16, 14),
-        panel_ref(5,  "vis-top-filtered",          16, 17, 16, 14),
-        panel_ref(6,  "vis-top-aggregated",        32, 17, 16, 14),
-        panel_ref(7,  "vis-top-sorted",             0, 31, 16, 12),
-        panel_ref(8,  "vis-top-sourced",           16, 31, 16, 12),
-        panel_ref(9,  "vis-response-time",         32, 31, 16, 12),
-        panel_ref(10, "vis-lookback-distribution",  0, 43, 24, 14),   # lookback histogram
-        panel_ref(11, "vis-lookback-fields",       24, 43, 24, 14),   # lookback date fields pie
+        panel_ref(0,  "vis-concrete-indices",       0,  0, 18, 12),   # concrete indices table
+        panel_ref(1,  "vis-ops-over-time",         18,  0, 18, 12),   # ops over time
+        panel_ref(2,  "vis-query-types",           36,  0, 12, 12),   # query type pie
+        panel_ref(3,  "vis-top-queried",            0, 12, 16, 14),
+        panel_ref(4,  "vis-top-filtered",          16, 12, 16, 14),
+        panel_ref(5,  "vis-top-aggregated",        32, 12, 16, 14),
+        panel_ref(6,  "vis-top-sorted",             0, 26, 16, 12),
+        panel_ref(7,  "vis-top-sourced",           16, 26, 16, 12),
+        panel_ref(8,  "vis-response-time",         32, 26, 16, 12),
+        panel_ref(9,  "vis-lookback-distribution",  0, 38, 24, 14),   # lookback histogram
+        panel_ref(10, "vis-lookback-fields",       24, 38, 24, 14),   # lookback date fields pie
         # Raw events table (saved search — type "search" not "visualization")
         {
-            "panelIndex": "12",
-            "gridData": {"x": 0, "y": 57, "w": 48, "h": 18, "i": "12"},
+            "panelIndex": "11",
+            "gridData": {"x": 0, "y": 52, "w": 48, "h": 18, "i": "11"},
             "version": "8.12.2",
             "type": "search",
-            "panelRefName": "panel_12",
+            "panelRefName": "panel_11",
         },
     ]
     usage_refs = [
-        {"name": "panel_0",  "type": "visualization", "id": "vis-index-group-filter"},
-        {"name": "panel_1",  "type": "visualization", "id": "vis-concrete-indices"},
-        {"name": "panel_2",  "type": "visualization", "id": "vis-ops-over-time"},
-        {"name": "panel_3",  "type": "visualization", "id": "vis-query-types"},
-        {"name": "panel_4",  "type": "visualization", "id": "vis-top-queried"},
-        {"name": "panel_5",  "type": "visualization", "id": "vis-top-filtered"},
-        {"name": "panel_6",  "type": "visualization", "id": "vis-top-aggregated"},
-        {"name": "panel_7",  "type": "visualization", "id": "vis-top-sorted"},
-        {"name": "panel_8",  "type": "visualization", "id": "vis-top-sourced"},
-        {"name": "panel_9",  "type": "visualization", "id": "vis-response-time"},
-        {"name": "panel_10", "type": "visualization", "id": "vis-lookback-distribution"},
-        {"name": "panel_11", "type": "visualization", "id": "vis-lookback-fields"},
-        {"name": "panel_12", "type": "search", "id": "search-usage-events"},
-    ]
+        {"name": "panel_0",  "type": "visualization", "id": "vis-concrete-indices"},
+        {"name": "panel_1",  "type": "visualization", "id": "vis-ops-over-time"},
+        {"name": "panel_2",  "type": "visualization", "id": "vis-query-types"},
+        {"name": "panel_3",  "type": "visualization", "id": "vis-top-queried"},
+        {"name": "panel_4",  "type": "visualization", "id": "vis-top-filtered"},
+        {"name": "panel_5",  "type": "visualization", "id": "vis-top-aggregated"},
+        {"name": "panel_6",  "type": "visualization", "id": "vis-top-sorted"},
+        {"name": "panel_7",  "type": "visualization", "id": "vis-top-sourced"},
+        {"name": "panel_8",  "type": "visualization", "id": "vis-response-time"},
+        {"name": "panel_9",  "type": "visualization", "id": "vis-lookback-distribution"},
+        {"name": "panel_10", "type": "visualization", "id": "vis-lookback-fields"},
+        {"name": "panel_11", "type": "search", "id": "search-usage-events"},
+    ] + control_refs
     objects.append({
         "id": "usage-heat",
         "type": "dashboard",
         "attributes": {
             "title": "Usage & Heat Dashboard",
+            "controlGroupInput": control_input,
             "panelsJSON": json.dumps(usage_panels),
             "optionsJSON": json.dumps({"useMargins": True, "syncColors": True, "syncCursor": True, "syncTooltips": False, "hidePanelTitles": False}),
             "timeRestore": True,
@@ -558,30 +588,30 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "references": usage_refs,
     })
 
-    # Multi-Index Comparison dashboard (using index_group, same filter control by reference)
+    # Multi-Index Comparison dashboard (using index_group native control)
+    comp_control_input, comp_control_refs = _control_group_input(usage_dv_id)
     comparison_panels = [
-        panel_ref(0, "vis-index-group-filter",         0,  0, 48,  5),   # same filter control as Usage & Heat
-        panel_ref(1, "vis-ops-by-index",               0,  5, 24, 14),
-        panel_ref(2, "vis-ops-by-index-operation",    24,  5, 24, 14),
-        panel_ref(3, "vis-ops-over-time-by-index",     0, 19, 32, 14),
-        panel_ref(4, "vis-response-time-by-index",    32, 19, 16, 14),
-        panel_ref(5, "vis-lookback-by-group",          0, 33, 24, 14),   # avg lookback by group
-        panel_ref(6, "vis-concrete-indices-comparison", 24, 33, 24, 14),
+        panel_ref(0, "vis-ops-by-index",               0,  0, 24, 14),
+        panel_ref(1, "vis-ops-by-index-operation",    24,  0, 24, 14),
+        panel_ref(2, "vis-ops-over-time-by-index",     0, 14, 32, 14),
+        panel_ref(3, "vis-response-time-by-index",    32, 14, 16, 14),
+        panel_ref(4, "vis-lookback-by-group",          0, 28, 24, 14),   # avg lookback by group
+        panel_ref(5, "vis-concrete-indices-comparison", 24, 28, 24, 14),
     ]
     comparison_refs = [
-        {"name": "panel_0", "type": "visualization", "id": "vis-index-group-filter"},
-        {"name": "panel_1", "type": "visualization", "id": "vis-ops-by-index"},
-        {"name": "panel_2", "type": "visualization", "id": "vis-ops-by-index-operation"},
-        {"name": "panel_3", "type": "visualization", "id": "vis-ops-over-time-by-index"},
-        {"name": "panel_4", "type": "visualization", "id": "vis-response-time-by-index"},
-        {"name": "panel_5", "type": "visualization", "id": "vis-lookback-by-group"},
-        {"name": "panel_6", "type": "visualization", "id": "vis-concrete-indices-comparison"},
-    ]
+        {"name": "panel_0", "type": "visualization", "id": "vis-ops-by-index"},
+        {"name": "panel_1", "type": "visualization", "id": "vis-ops-by-index-operation"},
+        {"name": "panel_2", "type": "visualization", "id": "vis-ops-over-time-by-index"},
+        {"name": "panel_3", "type": "visualization", "id": "vis-response-time-by-index"},
+        {"name": "panel_4", "type": "visualization", "id": "vis-lookback-by-group"},
+        {"name": "panel_5", "type": "visualization", "id": "vis-concrete-indices-comparison"},
+    ] + comp_control_refs
     objects.append({
         "id": "multi-index-comparison",
         "type": "dashboard",
         "attributes": {
             "title": "Multi-Index Heat Comparison",
+            "controlGroupInput": comp_control_input,
             "panelsJSON": json.dumps(comparison_panels),
             "optionsJSON": json.dumps({"useMargins": True, "syncColors": True, "syncCursor": True, "syncTooltips": False, "hidePanelTitles": False}),
             "timeRestore": True,
