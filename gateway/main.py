@@ -30,7 +30,7 @@ from gateway.proxy import proxy_request, close_proxy_client
 from gateway.extractor import extract_from_request
 from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, should_sample_event, get_event_sample_config, set_event_sample_config, get_query_body_config, set_query_body_config, close_event_client
 from gateway.analyzer import compute_heat, close_analyzer_client
-from gateway.ui import HTML_PAGE
+from gateway.ui import load_html
 from gateway import metadata as metadata_mod
 from gateway.metadata import close_metadata_client
 from gateway import metrics
@@ -199,7 +199,7 @@ async def sample_events(count: int = 20, index_group: str | None = None):
 @app.get("/_gateway/ui")
 async def ui():
     """Serve the control panel UI."""
-    return HTMLResponse(content=HTML_PAGE)
+    return HTMLResponse(content=load_html())
 
 
 @app.get("/_gateway/scenarios")

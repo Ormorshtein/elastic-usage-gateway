@@ -28,7 +28,8 @@ gateway/proxy.py      — Reverse proxy (httpx)
 gateway/extractor.py  — DSL field extraction from ES requests
 gateway/events.py     — Usage event model + emission to .usage-events index
 gateway/analyzer.py   — Heat score computation
-gateway/ui.py         — Control panel HTML (inline, no framework)
+gateway/ui.py         — UI loader (reads ui.html from disk per request)
+gateway/ui.html       — Control panel HTML/CSS/JS (edit + refresh, no restart)
 generator/seed.py     — Load sample products into ES
 generator/generate.py — CLI traffic generator
 generator/queries.py  — Query templates with weighted distribution
@@ -42,8 +43,8 @@ restart-gateway.bat   — Kill + restart gateway process (Windows)
 - Python 3.10+, type hints where helpful
 - FastAPI for HTTP, httpx for async HTTP client
 - No ORMs — direct ES REST API via httpx
-- Gateway UI is vanilla HTML/CSS/JS in a Python string (`gateway/ui.py`)
-  - **Important**: JS template literals (`${...}`) inside the Python triple-quoted string — use `\\n` not `\n` for JS newlines, otherwise Python interprets the escape
+- Gateway UI is vanilla HTML/CSS/JS in `gateway/ui.html` (no build step)
+  - Read from disk on each request — edit and refresh browser, no gateway restart needed
 - Logging via stdlib `logging`, not print()
 
 ## Git Workflow
