@@ -127,12 +127,16 @@ Every usage event contains two index-related fields: `index` (raw) and `index_gr
 
 ### 1. Start Elasticsearch & Kibana
 
+The project includes a `docker-compose.yml` that runs Elasticsearch 8.12.2 and Kibana 8.12.2 as containers (single-node, security disabled for local dev).
+
 ```bash
 docker-compose up -d
 # Wait for ES to be healthy
 curl http://localhost:9200/_cluster/health
-# Kibana available at http://localhost:5601
 ```
+
+- **Elasticsearch**: [http://localhost:9200](http://localhost:9200)
+- **Kibana**: [http://localhost:5601](http://localhost:5601)
 
 ### 2. Install Dependencies
 
@@ -147,11 +151,6 @@ python -m gateway.main
 # Gateway listens on port 9301, proxies to ES on port 9200
 ```
 
-To restart the gateway after code changes:
-```bash
-restart-gateway.bat
-```
-
 ### 4. Seed Sample Data
 
 ```bash
@@ -159,36 +158,27 @@ python -m generator.seed --gateway
 # Creates 'products' index with 100 sample documents
 ```
 
-### 5. Generate Traffic
-
-```bash
-python -m generator.generate --duration 60 --rps 10
-# Sends 600 queries with intentionally skewed field usage
-```
-
-### 6. Import Kibana Dashboards
+### 5. Import Kibana Dashboards
 
 ```bash
 python kibana_setup.py --no-wait
 ```
 
-### 7. View Heat Report
+### 6. Generate Traffic & View Results
 
+You can generate traffic in two ways:
+
+**Option A — Via the UI** (recommended): Open the gateway control panel at [http://localhost:9301/_gateway/ui](http://localhost:9301/_gateway/ui). Use the Generator tab to select a scenario, adjust query weights, and click **Run Scenario** or **Run All Scenarios**.
+
+**Option B — Via CLI**:
 ```bash
-curl http://localhost:9301/_gateway/heat | python -m json.tool
+python -m generator.generate --duration 60 --rps 10
 ```
 
-You can also view visual reports in **Kibana** — open [http://localhost:5601](http://localhost:5601) in your browser and navigate to **Dashboards** to see the pre-built usage and heat dashboards.
-
-## Expected Results
-
-After running the generator, the heat report should show:
-
-| Tier | Fields |
-|------|--------|
-| Hot | title, category, price |
-| Warm | brand, rating, description |
-| Unused | internal_sku, legacy_supplier_code, stock_count, created_at, subcategory, tags |
+After generating traffic, view the results:
+- **Kibana dashboards**: Open [http://localhost:5601](http://localhost:5601) and navigate to **Dashboards** to see the pre-built usage and heat visualizations.
+- **Heat report API**: `curl http://localhost:9301/_gateway/heat | python -m json.tool`
+- **Gateway monitor**: Switch to the **Monitor** tab in the UI to see live stats.
 
 ## Configuration
 
