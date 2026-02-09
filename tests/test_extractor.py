@@ -250,8 +250,14 @@ class TestExtractFromRequest:
         body = json.dumps({"title": "Laptop", "price": 999}).encode()
         indices, op, refs = extract_from_request("/products/_doc/1", "PUT", body)
         assert indices == ["products"]
-        assert op == "doc"
+        assert op == "doc_write"
         assert refs.written == {"title", "price"}
+
+    def test_doc_get(self):
+        indices, op, refs = extract_from_request("/products/_doc/1", "GET", b"")
+        assert indices == ["products"]
+        assert op == "doc_get"
+        assert refs.written == set()
 
     def test_empty_body(self):
         indices, op, refs = extract_from_request("/products/_search", "POST", b"")
@@ -437,6 +443,38 @@ class TestBulkUpdateExtraction:
         body = "\n".join(lines).encode()
         refs = _extract_from_bulk(body, "products")
         assert refs.written == {"title", "price", "brand"}
+
+
+# --- update extraction ---
+
+class TestExtractFromUpdate:
+    def test_update_with_doc(self):
+        body = json.dumps({"doc": {"price": 499, "stock_count": 10}}).encode()
+        indices, op, refs = extract_from_request("/products/_update/1", "POST", body)
+        assert indices == ["products"]
+        assert op == "update"
+        assert refs.written == {"price", "stock_count"}
+
+    def test_update_with_doc_and_upsert(self):
+        body = json.dumps({
+            "doc": {"price": 499},
+            "upsert": {"title": "New Product", "price": 499, "category": "electronics"},
+        }).encode()
+        indices, op, refs = extract_from_request("/products/_update/1", "POST", body)
+        assert op == "update"
+        assert refs.written == {"price", "title", "category"}
+
+    def test_update_get_method_ignored(self):
+        """GET requests to _update path should not extract written fields."""
+        body = json.dumps({"doc": {"price": 499}}).encode()
+        indices, op, refs = extract_from_request("/products/_update/1", "GET", body)
+        assert op == "update"
+        assert refs.written == set()
+
+    def test_update_empty_body(self):
+        indices, op, refs = extract_from_request("/products/_update/1", "POST", b"")
+        assert op == "update"
+        assert refs.written == set()
 
 
 # --- msearch extraction ---

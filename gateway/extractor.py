@@ -353,11 +353,32 @@ def extract_from_request(
         # msearch uses NDJSON: alternating header/query lines
         refs = _extract_from_msearch(body)
 
-    elif operation == "doc" and method.upper() in ("PUT", "POST"):
+    elif operation == "doc":
+        # Distinguish read vs write for single-doc operations
+        if method.upper() in ("PUT", "POST"):
+            operation = "doc_write"
+            try:
+                parsed = json.loads(body) if body else {}
+                if isinstance(parsed, dict):
+                    refs = extract_fields_from_document(parsed)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                logger.debug("Could not parse body as JSON for %s", path)
+        else:
+            operation = "doc_get"
+
+    elif operation == "update" and method.upper() == "POST":
+        # Single-doc update: POST /<index>/_update/<id>
+        # Body is {"doc": {fields...}} and/or {"upsert": {fields...}}
         try:
             parsed = json.loads(body) if body else {}
             if isinstance(parsed, dict):
-                refs = extract_fields_from_document(parsed)
+                refs = FieldRefs()
+                for wrapper_key in ("doc", "upsert"):
+                    inner = parsed.get(wrapper_key)
+                    if isinstance(inner, dict):
+                        for key in inner:
+                            if _is_user_field(key):
+                                refs.written.add(key)
         except (json.JSONDecodeError, UnicodeDecodeError):
             logger.debug("Could not parse body as JSON for %s", path)
 

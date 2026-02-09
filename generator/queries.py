@@ -102,6 +102,60 @@ def products_match_all(**kwargs):
     return "POST", "/products/_search", json.dumps(body)
 
 
+# -- Products write operations --
+
+PRODUCT_TAGS_POOL = ["wireless", "bluetooth", "premium", "eco-friendly", "bestseller", "new-arrival"]
+
+
+def products_index_single(**kwargs):
+    """Index (upsert) a single product document."""
+    doc_id = random.randint(1, 100)
+    body = {
+        "title": f"{random.choice(SEARCH_TERMS).title()} {random.choice(PRODUCT_BRANDS)} Product",
+        "category": random.choice(PRODUCT_CATEGORIES),
+        "brand": random.choice(PRODUCT_BRANDS),
+        "price": round(random.uniform(9.99, 499.99), 2),
+        "rating": round(random.uniform(1.0, 5.0), 1),
+        "stock_count": random.randint(0, 500),
+        "tags": random.sample(PRODUCT_TAGS_POOL, k=random.randint(1, 3)),
+    }
+    return "PUT", f"/products/_doc/{doc_id}", json.dumps(body)
+
+
+def products_bulk_index(**kwargs):
+    """Bulk index a batch of product documents."""
+    batch_size = random.randint(3, 8)
+    lines = []
+    for _ in range(batch_size):
+        doc_id = random.randint(1, 100)
+        action = {"index": {"_index": "products", "_id": str(doc_id)}}
+        doc = {
+            "title": f"{random.choice(SEARCH_TERMS).title()} {random.choice(PRODUCT_BRANDS)} Product",
+            "category": random.choice(PRODUCT_CATEGORIES),
+            "brand": random.choice(PRODUCT_BRANDS),
+            "price": round(random.uniform(9.99, 499.99), 2),
+            "rating": round(random.uniform(1.0, 5.0), 1),
+            "stock_count": random.randint(0, 500),
+        }
+        lines.append(json.dumps(action))
+        lines.append(json.dumps(doc))
+    return "POST", "/products/_bulk", "\n".join(lines) + "\n"
+
+
+def products_update_price_stock(**kwargs):
+    """Partial update of price and/or stock_count for an existing product."""
+    doc_id = random.randint(1, 100)
+    updates = {}
+    if random.random() < 0.7:
+        updates["price"] = round(random.uniform(9.99, 499.99), 2)
+    if random.random() < 0.7:
+        updates["stock_count"] = random.randint(0, 500)
+    if not updates:
+        updates["price"] = round(random.uniform(9.99, 499.99), 2)
+    body = {"doc": updates}
+    return "POST", f"/products/_update/{doc_id}", json.dumps(body)
+
+
 # ============================================================
 # Logs queries
 # ============================================================
@@ -190,6 +244,34 @@ def logs_filter_by_service_and_status(**kwargs):
         "size": 30,
     }
     return "POST", "/logs/_search", json.dumps(body)
+
+
+# -- Logs write operations --
+
+LOG_INGEST_ENDPOINTS = ["/api/users", "/api/orders", "/api/search", "/api/products", "/api/auth/login"]
+
+
+def logs_bulk_ingest(**kwargs):
+    """Bulk ingest a batch of log entries (most common ES log pattern)."""
+    batch_size = random.randint(5, 15)
+    lines = []
+    for _ in range(batch_size):
+        action = {"index": {"_index": "logs-2026.02.06"}}
+        doc = {
+            "timestamp": f"2026-02-{random.randint(4, 8):02d}T{random.randint(0, 23):02d}:{random.randint(0, 59):02d}:{random.randint(0, 59):02d}.000Z",
+            "level": random.choice(LOG_LEVELS),
+            "service": random.choice(LOG_SERVICES),
+            "host": f"web-{random.randint(1, 3):02d}",
+            "message": f"Generated log entry {random.randint(1000, 9999)}",
+            "status_code": random.choice([200, 200, 200, 400, 500]),
+            "duration_ms": round(random.uniform(1, 2000), 1),
+            "trace_id": f"trace-{random.randint(100000, 999999)}",
+            "endpoint": random.choice(LOG_INGEST_ENDPOINTS),
+            "region": random.choice(["us-east-1", "eu-west-1"]),
+        }
+        lines.append(json.dumps(action))
+        lines.append(json.dumps(doc))
+    return "POST", "/logs-2026.02.06/_bulk", "\n".join(lines) + "\n"
 
 
 # ============================================================
@@ -283,6 +365,40 @@ def orders_agg_by_country(**kwargs):
     return "POST", "/orders/_search", json.dumps(body)
 
 
+# -- Orders write operations --
+
+ORDERS_CONCRETE_INDICES = ["orders-us", "orders-eu"]
+
+
+def orders_create_new(**kwargs):
+    """Create a new order document via single-doc index."""
+    concrete_index = random.choice(ORDERS_CONCRETE_INDICES)
+    order_id = f"ORD-{random.randint(10000, 99999)}"
+    body = {
+        "order_id": order_id,
+        "customer_id": f"CUST-{random.randint(1000, 9999)}",
+        "customer_name": f"{random.choice(CUSTOMER_NAMES)} Smith",
+        "order_date": f"2026-02-{random.randint(1, 8):02d}T{random.randint(0, 23):02d}:00:00Z",
+        "status": "pending",
+        "total_amount": round(random.uniform(10.0, 1500.0), 2),
+        "item_count": random.randint(1, 10),
+        "payment_method": random.choice(["credit_card", "paypal", "debit_card"]),
+        "shipping_country": random.choice(ORDER_COUNTRIES),
+        "category": random.choice(ORDER_CATEGORIES),
+        "channel": random.choice(["web", "mobile", "api"]),
+    }
+    return "PUT", f"/{concrete_index}/_doc/{order_id}", json.dumps(body)
+
+
+def orders_update_status(**kwargs):
+    """Partial update: change an order's status (common order lifecycle pattern)."""
+    concrete_index = random.choice(ORDERS_CONCRETE_INDICES)
+    doc_id = random.randint(1, 200)
+    new_status = random.choice(["confirmed", "shipped", "delivered", "cancelled"])
+    body = {"doc": {"status": new_status}}
+    return "POST", f"/{concrete_index}/_update/{doc_id}", json.dumps(body)
+
+
 # ============================================================
 # Scenario definitions
 # ============================================================
@@ -299,6 +415,9 @@ SCENARIOS = {
             "search_by_description": search_by_description,
             "get_by_id": products_get_by_id,
             "match_all": products_match_all,
+            "index_single": products_index_single,
+            "bulk_index": products_bulk_index,
+            "update_price_stock": products_update_price_stock,
         },
         "weights": {
             "search_by_title": 40,
@@ -308,6 +427,9 @@ SCENARIOS = {
             "search_by_description": 5,
             "get_by_id": 3,
             "match_all": 2,
+            "index_single": 3,
+            "bulk_index": 3,
+            "update_price_stock": 5,
         },
         "labels": {
             "search_by_title": "Search by title",
@@ -317,6 +439,9 @@ SCENARIOS = {
             "search_by_description": "Search by description",
             "get_by_id": "Get by ID",
             "match_all": "Match all",
+            "index_single": "Index single product",
+            "bulk_index": "Bulk index products",
+            "update_price_stock": "Update price/stock",
         },
         "time_range_queries": set(),
     },
@@ -329,6 +454,7 @@ SCENARIOS = {
             "logs_agg_by_service": logs_agg_by_service,
             "logs_agg_over_time": logs_agg_over_time,
             "logs_filter_by_service_and_status": logs_filter_by_service_and_status,
+            "logs_bulk_ingest": logs_bulk_ingest,
         },
         "weights": {
             "logs_filter_by_level": 35,
@@ -336,6 +462,7 @@ SCENARIOS = {
             "logs_agg_by_service": 20,
             "logs_agg_over_time": 15,
             "logs_filter_by_service_and_status": 10,
+            "logs_bulk_ingest": 8,
         },
         "labels": {
             "logs_filter_by_level": "Filter by level + time",
@@ -343,6 +470,7 @@ SCENARIOS = {
             "logs_agg_by_service": "Aggregate by service",
             "logs_agg_over_time": "Histogram over time",
             "logs_filter_by_service_and_status": "Filter service + error status",
+            "logs_bulk_ingest": "Bulk ingest logs",
         },
         "time_range_queries": {"logs_filter_by_level", "logs_agg_over_time"},
     },
@@ -356,6 +484,8 @@ SCENARIOS = {
             "orders_search_customer": orders_search_customer,
             "orders_date_range": orders_date_range,
             "orders_agg_by_country": orders_agg_by_country,
+            "orders_create_new": orders_create_new,
+            "orders_update_status": orders_update_status,
         },
         "weights": {
             "orders_agg_revenue_by_category": 25,
@@ -364,6 +494,8 @@ SCENARIOS = {
             "orders_search_customer": 15,
             "orders_date_range": 15,
             "orders_agg_by_country": 10,
+            "orders_create_new": 5,
+            "orders_update_status": 5,
         },
         "labels": {
             "orders_agg_revenue_by_category": "Revenue by category",
@@ -372,6 +504,8 @@ SCENARIOS = {
             "orders_search_customer": "Search customer name",
             "orders_date_range": "Date range filter",
             "orders_agg_by_country": "Revenue by country",
+            "orders_create_new": "Create new order",
+            "orders_update_status": "Update order status",
         },
         "time_range_queries": {"orders_date_range"},
     },
