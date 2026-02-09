@@ -175,7 +175,10 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="stat-box"><div class="stat-label">Uptime</div><div class="stat-value" id="st-uptime">-</div></div>
     <div class="stat-box"><div class="stat-label">Index groups</div><div class="stat-value" id="st-groups">-</div></div>
   </div>
-  <div class="refresh-hint">Auto-refreshes every 5 seconds</div>
+  <div style="display:flex; align-items:center; gap:12px; margin-top:12px;">
+    <button class="btn-clear" id="btn-reset-metrics" onclick="resetMetrics()">Reset Metrics</button>
+    <span class="refresh-hint">Auto-refreshes every 5 seconds</span>
+  </div>
 </div>
 
 <div class="card">
@@ -526,6 +529,19 @@ async function refreshStats() {
   } catch (e) {
     console.warn('Failed to fetch stats:', e);
   }
+}
+
+async function resetMetrics() {
+  if (!confirm('Reset all gateway metrics to zero?')) return;
+  const btn = document.getElementById('btn-reset-metrics');
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/_gateway/metrics/reset', { method: 'POST' });
+    if (resp.ok) refreshStats();
+  } catch (e) {
+    console.warn('Failed to reset metrics:', e);
+  }
+  btn.disabled = false;
 }
 
 async function loadConfig() {

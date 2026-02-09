@@ -128,6 +128,13 @@ async def stats():
     }
 
 
+@app.post("/_gateway/metrics/reset")
+async def reset_metrics():
+    """Reset all in-memory counters and timings to zero."""
+    metrics.reset()
+    return {"status": "ok", "message": "All metrics reset to zero"}
+
+
 @app.get("/_gateway/config")
 async def get_config():
     """Return current gateway runtime configuration."""
