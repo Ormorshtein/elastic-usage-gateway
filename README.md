@@ -202,9 +202,14 @@ All settings via environment variables (see `config.py`):
 | `USAGE_INDEX` | `.usage-events` | Index for storing usage events |
 | `CLUSTER_ID` | `default` | Cluster identifier |
 | `PROXY_TIMEOUT` | `120` | Proxy request timeout (seconds) |
+| `PROXY_BODY_LIMIT` | `1048576` | Body size threshold for streaming (bytes) |
 | `EVENT_TIMEOUT` | `10` | Event emission timeout (seconds) |
 | `ANALYZER_TIMEOUT` | `30` | Heat analysis query timeout (seconds) |
 | `METADATA_REFRESH_INTERVAL` | `60` | Metadata cache refresh (seconds) |
+| `GATEWAY_WORKERS` | `1` | Uvicorn worker processes (set to CPU count for production) |
+| `BULK_FLUSH_SIZE` | `100` | Max events per bulk write batch |
+| `BULK_FLUSH_INTERVAL` | `0.5` | Max seconds between bulk flushes |
+| `BULK_QUEUE_SIZE` | `5000` | Bounded event queue size (drops when full) |
 | `EVENT_SAMPLE_RATE` | `1.0` | Fraction of requests that emit events (0.0-1.0) |
 | `QUERY_BODY_ENABLED` | `true` | Store query bodies in events |
 | `QUERY_BODY_SAMPLE_RATE` | `1.0` | Fraction of events to store bodies |
@@ -273,6 +278,7 @@ Returns all internal counters:
   "events_failed": 8,
   "events_skipped": 490,
   "events_sampled_out": 120,
+  "events_dropped": 0,
   "extraction_errors": 0,
   "metadata_refresh_ok": 60,
   "metadata_refresh_failed": 0,
@@ -285,7 +291,8 @@ Returns all internal counters:
 ```
 
 Key metrics to watch:
-- **events_failed** — if this grows steadily, event writes to ES are failing
+- **events_failed** — if this grows steadily, bulk event writes to ES are failing
+- **events_dropped** — events dropped due to queue backpressure (queue full). If this grows, ES is too slow to keep up with event volume — consider increasing `BULK_QUEUE_SIZE` or reducing `EVENT_SAMPLE_RATE`
 - **events_sampled_out** — events skipped due to sampling (expected when rate < 100%)
 - **requests_failed** — proxy 502 errors (ES unreachable for proxied requests)
 - **extraction_errors** — DSL parsing failures (should be rare/zero)

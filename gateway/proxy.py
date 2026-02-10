@@ -1,6 +1,11 @@
 """
 Reverse proxy that forwards all traffic to Elasticsearch transparently.
 
+For request bodies below PROXY_BODY_LIMIT (default 1MB), the body is
+buffered in memory so the extractor can parse it. For larger bodies
+(e.g., big bulk imports), the request is streamed to ES and the response
+streamed back — no field extraction, but no memory spike.
+
 Safety invariant: the proxy NEVER modifies, delays, or blocks a request
 due to observation failures. If extraction or event emission fails,
 the request still goes through.
@@ -10,8 +15,9 @@ import time
 import logging
 import httpx
 from fastapi import Request, Response
+from starlette.responses import StreamingResponse
 
-from config import ES_HOST, PROXY_TIMEOUT
+from config import ES_HOST, PROXY_TIMEOUT, PROXY_BODY_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -20,29 +26,65 @@ logger = logging.getLogger(__name__)
 _client = httpx.AsyncClient(base_url=ES_HOST, timeout=PROXY_TIMEOUT)
 
 
-async def proxy_request(request: Request) -> tuple[Response, dict]:
-    """
-    Forward a request to Elasticsearch and return the response.
-
-    Returns:
-        Tuple of (Response to send to client, metadata dict for event emission).
-        Metadata includes: path, method, body_bytes, status_code, elapsed_ms.
-    """
+def _build_forwarded_path(request: Request) -> str:
+    """Build the full path with query string for forwarding."""
     path = request.url.path
     query_string = request.url.query
     if query_string:
         path = f"{path}?{query_string}"
+    return path
 
-    method = request.method
+
+def _clean_request_headers(request: Request) -> dict:
+    """Copy and clean request headers for forwarding."""
     headers = dict(request.headers)
-    # Remove hop-by-hop and encoding headers — httpx manages its own
-    # connection and we don't want compressed responses that we'd then
-    # have to re-frame when forwarding.
     for h in ("host", "accept-encoding", "connection"):
         headers.pop(h, None)
+    return headers
 
-    # Buffer the body once
+
+_SKIP_RESPONSE_HEADERS = {
+    "transfer-encoding", "connection", "keep-alive",
+    "content-encoding", "content-length",
+}
+
+
+def _filter_response_headers(es_response) -> dict:
+    """Strip framing/encoding headers from ES response for forwarding."""
+    return {
+        k: v for k, v in es_response.headers.items()
+        if k.lower() not in _SKIP_RESPONSE_HEADERS
+    }
+
+
+async def proxy_request(request: Request) -> tuple[Response, dict]:
+    """
+    Forward a request to Elasticsearch and return the response.
+
+    Bodies below PROXY_BODY_LIMIT are buffered (enabling field extraction).
+    Bodies above the limit are streamed (no extraction, but no memory spike).
+
+    Returns:
+        Tuple of (Response to send to client, metadata dict for event emission).
+        Metadata includes: path, method, body, response_status, elapsed_ms.
+        For streamed requests, metadata is empty (no observation possible).
+    """
+    path = _build_forwarded_path(request)
+    method = request.method
+    headers = _clean_request_headers(request)
+
+    # Check content-length to decide buffered vs streamed
+    content_length = int(request.headers.get("content-length", "0") or "0")
+
+    if content_length > PROXY_BODY_LIMIT:
+        return await _proxy_streamed(request, path, method, headers)
+
+    # --- Buffered path (normal — enables field extraction) ---
     body = await request.body()
+
+    # Double-check actual body size (content-length may be missing or wrong)
+    if len(body) > PROXY_BODY_LIMIT:
+        return await _proxy_with_body_streamed(body, path, method, headers)
 
     start = time.monotonic()
 
@@ -71,26 +113,78 @@ async def proxy_request(request: Request) -> tuple[Response, dict]:
         "elapsed_ms": round(elapsed_ms, 2),
     }
 
-    # httpx automatically decodes the response body (un-chunks, decompresses
-    # gzip/deflate). The original headers (content-length, content-encoding,
-    # transfer-encoding) no longer match the decoded body we're forwarding.
-    # Strip all framing/encoding headers and let FastAPI set correct ones.
-    skip_headers = {
-        "transfer-encoding", "connection", "keep-alive",
-        "content-encoding", "content-length",
-    }
-    forwarded_headers = {
-        k: v for k, v in es_response.headers.items()
-        if k.lower() not in skip_headers
-    }
+    response = Response(
+        content=es_response.content,
+        status_code=es_response.status_code,
+        headers=_filter_response_headers(es_response),
+    )
+
+    return response, metadata
+
+
+async def _proxy_streamed(
+    request: Request, path: str, method: str, headers: dict
+) -> tuple[StreamingResponse, dict]:
+    """Stream a large request body to ES without buffering."""
+    start = time.monotonic()
+
+    try:
+        es_response = await _client.request(
+            method=method,
+            url=path,
+            content=request.stream(),
+            headers=headers,
+        )
+    except httpx.RequestError as exc:
+        logger.error("Failed to reach Elasticsearch (streamed): %s", exc)
+        return Response(
+            content=f"Gateway error: could not reach Elasticsearch: {exc}",
+            status_code=502,
+        ), {}
+
+    elapsed_ms = (time.monotonic() - start) * 1000
+    logger.debug("Streamed request %s %s (%.1fms, no extraction)", method, path, elapsed_ms)
 
     response = Response(
         content=es_response.content,
         status_code=es_response.status_code,
-        headers=forwarded_headers,
+        headers=_filter_response_headers(es_response),
     )
 
-    return response, metadata
+    # Return empty metadata — no extraction for streamed requests
+    return response, {}
+
+
+async def _proxy_with_body_streamed(
+    body: bytes, path: str, method: str, headers: dict
+) -> tuple[Response, dict]:
+    """Forward an already-buffered large body without extraction metadata."""
+    start = time.monotonic()
+
+    try:
+        es_response = await _client.request(
+            method=method,
+            url=path,
+            content=body,
+            headers=headers,
+        )
+    except httpx.RequestError as exc:
+        logger.error("Failed to reach Elasticsearch (large body): %s", exc)
+        return Response(
+            content=f"Gateway error: could not reach Elasticsearch: {exc}",
+            status_code=502,
+        ), {}
+
+    elapsed_ms = (time.monotonic() - start) * 1000
+    logger.debug("Large body %s %s (%d bytes, %.1fms, no extraction)", method, path, len(body), elapsed_ms)
+
+    response = Response(
+        content=es_response.content,
+        status_code=es_response.status_code,
+        headers=_filter_response_headers(es_response),
+    )
+
+    return response, {}
 
 
 async def close_proxy_client() -> None:

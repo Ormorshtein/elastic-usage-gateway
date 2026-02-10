@@ -25,10 +25,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 
-from config import GATEWAY_HOST, GATEWAY_PORT, ES_HOST, USAGE_INDEX
+from config import GATEWAY_HOST, GATEWAY_PORT, GATEWAY_WORKERS, ES_HOST, USAGE_INDEX
 from gateway.proxy import proxy_request, close_proxy_client
 from gateway.extractor import extract_from_request
-from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, should_sample_event, get_event_sample_config, set_event_sample_config, get_query_body_config, set_query_body_config, close_event_client
+from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, should_sample_event, get_event_sample_config, set_event_sample_config, get_query_body_config, set_query_body_config, close_event_client, start_bulk_writer
 from gateway.analyzer import compute_heat, close_analyzer_client
 from gateway.ui import load_html
 from gateway import metadata as metadata_mod
@@ -43,6 +43,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Shared httpx client for gateway endpoints that query ES
+# (health, sample-events, clear-events). Avoids creating a new client per request.
+_gw_client = httpx.AsyncClient(base_url=ES_HOST, timeout=10.0)
 
 # Operations that are ES-internal and shouldn't generate usage events
 _SKIP_OPERATIONS = {"cluster", "cat", "nodes", "tasks", "gateway"}
@@ -66,6 +69,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Could not ensure usage index at startup — will retry on first event")
     metadata_mod.start_refresh_loop()
+    start_bulk_writer()
     logger.info("Gateway ready — proxying to Elasticsearch")
     yield
     logger.info("Gateway shutting down — closing clients")
@@ -73,6 +77,7 @@ async def lifespan(app: FastAPI):
     await close_proxy_client()
     await close_analyzer_client()
     await close_metadata_client()
+    await _gw_client.aclose()
 
 
 app = FastAPI(title="ES Usage Gateway", lifespan=lifespan)
@@ -102,8 +107,7 @@ async def health():
         "events_failed": stats["events_failed"],
     }
     try:
-        async with httpx.AsyncClient(base_url=ES_HOST, timeout=2.0) as client:
-            resp = await client.head("/")
+        resp = await _gw_client.head("/")
         if resp.status_code < 500:
             return {**base, "status": "healthy", "elasticsearch": "reachable"}
         return JSONResponse(
@@ -182,18 +186,17 @@ async def sample_events(count: int = 20, index_group: str | None = None):
     }
     if index_group:
         es_query["query"] = {"term": {"index_group": index_group}}
-    async with httpx.AsyncClient(base_url=ES_HOST, timeout=10.0) as client:
-        resp = await client.post(
-            f"/{USAGE_INDEX}/_search",
-            json=es_query,
-        )
-        if resp.status_code == 200:
-            hits = resp.json().get("hits", {}).get("hits", [])
-            return {"count": len(hits), "events": [h["_source"] for h in hits]}
-        return JSONResponse(
-            content={"error": resp.text[:300]},
-            status_code=resp.status_code,
-        )
+    resp = await _gw_client.post(
+        f"/{USAGE_INDEX}/_search",
+        json=es_query,
+    )
+    if resp.status_code == 200:
+        hits = resp.json().get("hits", {}).get("hits", [])
+        return {"count": len(hits), "events": [h["_source"] for h in hits]}
+    return JSONResponse(
+        content={"error": resp.text[:300]},
+        status_code=resp.status_code,
+    )
 
 
 @app.get("/_gateway/ui")
@@ -336,19 +339,18 @@ async def generate(req: GenerateRequest):
 @app.delete("/_gateway/events")
 async def clear_events():
     """Delete all documents in the usage-events index."""
-    async with httpx.AsyncClient(base_url=ES_HOST, timeout=30.0) as client:
-        resp = await client.post(
-            f"/{USAGE_INDEX}/_delete_by_query",
-            json={"query": {"match_all": {}}},
-            params={"refresh": "true"},
-        )
-        if resp.status_code == 200:
-            deleted = resp.json().get("deleted", 0)
-            return {"deleted": deleted}
-        return JSONResponse(
-            content={"error": resp.text[:300]},
-            status_code=resp.status_code,
-        )
+    resp = await _gw_client.post(
+        f"/{USAGE_INDEX}/_delete_by_query",
+        json={"query": {"match_all": {}}},
+        params={"refresh": "true"},
+    )
+    if resp.status_code == 200:
+        deleted = resp.json().get("deleted", 0)
+        return {"deleted": deleted}
+    return JSONResponse(
+        content={"error": resp.text[:300]},
+        status_code=resp.status_code,
+    )
 
 
 # --- Catch-all proxy route ---
@@ -424,5 +426,6 @@ if __name__ == "__main__":
         "gateway.main:app",
         host=GATEWAY_HOST,
         port=GATEWAY_PORT,
+        workers=GATEWAY_WORKERS,
         log_level="info",
     )

@@ -50,6 +50,17 @@ FIELD_HEAT_HOT = float(os.getenv("FIELD_HEAT_HOT", "0.15"))
 FIELD_HEAT_WARM = float(os.getenv("FIELD_HEAT_WARM", "0.05"))
 FIELD_HEAT_COLD = float(os.getenv("FIELD_HEAT_COLD", "0.01"))
 
+# --- Proxy ---
+PROXY_BODY_LIMIT = int(os.getenv("PROXY_BODY_LIMIT", str(1024 * 1024)))  # 1MB
+
+# --- Workers ---
+GATEWAY_WORKERS = int(os.getenv("GATEWAY_WORKERS", "1"))
+
+# --- Bulk Event Writer ---
+BULK_FLUSH_SIZE = int(os.getenv("BULK_FLUSH_SIZE", "100"))
+BULK_FLUSH_INTERVAL = float(os.getenv("BULK_FLUSH_INTERVAL", "0.5"))
+BULK_QUEUE_SIZE = int(os.getenv("BULK_QUEUE_SIZE", "5000"))
+
 # --- Event Sampling ---
 EVENT_SAMPLE_RATE = float(os.getenv("EVENT_SAMPLE_RATE", "1.0"))
 

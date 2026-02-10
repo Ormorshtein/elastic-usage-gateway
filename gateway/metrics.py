@@ -16,6 +16,7 @@ _counters = {
     "events_failed": 0,
     "events_skipped": 0,
     "events_sampled_out": 0,
+    "events_dropped": 0,
     "extraction_errors": 0,
     "metadata_refresh_ok": 0,
     "metadata_refresh_failed": 0,
@@ -29,6 +30,11 @@ _request_time = {"sum_ms": 0.0, "max_ms": 0.0, "count": 0}
 def inc(name: str) -> None:
     """Increment a counter by 1."""
     _counters[name] = _counters.get(name, 0) + 1
+
+
+def inc_by(name: str, n: int) -> None:
+    """Increment a counter by n."""
+    _counters[name] = _counters.get(name, 0) + n
 
 
 def observe_es_time(ms: float) -> None:

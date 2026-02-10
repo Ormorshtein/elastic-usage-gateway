@@ -63,6 +63,8 @@ This enables data-driven decisions about ILM (Index Lifecycle Management), mappi
 
 Forwards all HTTP traffic to Elasticsearch using a long-lived `httpx.AsyncClient` with connection pooling. Returns the raw response plus metadata (path, method, body, timing) for observation.
 
+For request bodies below `PROXY_BODY_LIMIT` (default 1MB), the body is buffered in memory so the extractor can parse it. For larger bodies (e.g., large bulk imports), the request is streamed to ES without buffering — no field extraction, but no memory spike.
+
 **Safety invariant**: The proxy NEVER modifies, delays, or blocks a request due to observation failures.
 
 ### gateway/extractor.py — DSL Field Extractor
@@ -86,9 +88,18 @@ The extractor never raises exceptions — it returns what it can find.
 
 ### gateway/events.py — Event Emission
 
-Builds usage event documents and writes them to the `.usage-events` index. Events are emitted as fire-and-forget background tasks via `asyncio.create_task()` — failures are logged but never affect request handling.
+Builds usage event documents and writes them to the `.usage-events` index via a **bulk writer** pipeline:
+
+1. Request handler calls `emit_event_background(event)` which places the event into a bounded `asyncio.Queue`.
+2. A background consumer task drains the queue and flushes events to ES via the `_bulk` API — either when the batch reaches `BULK_FLUSH_SIZE` (default 100) or every `BULK_FLUSH_INTERVAL` seconds (default 0.5s), whichever comes first.
+3. On shutdown, the writer receives a stop sentinel, drains remaining events, and flushes before exiting.
+
+**Backpressure**: If the queue reaches `BULK_QUEUE_SIZE` (default 5000), new events are dropped (not blocked) and counted as `events_dropped`. This prevents unbounded memory growth if ES is slow or unreachable.
+
+**Shutdown**: Uses a sentinel-based stop signal (not `task.cancel()`) to guarantee the final flush completes without CancelledError interruption.
 
 Features:
+- **Bulk writes**: 10-50x more efficient than single-doc writes. One `_bulk` call per batch instead of one `POST /_doc` per event.
 - **Event sampling**: Configurable `EVENT_SAMPLE_RATE` (0.0-1.0) to reduce event volume in production. Field heat (proportional) is unaffected; index heat (absolute ops/hour) scales proportionally but relative rankings are preserved. Runtime-adjustable via UI or config API.
 - **Query fingerprinting**: SHA-256 of canonicalized JSON for deduplication.
 - **Query body storage**: Optional, with configurable sampling rate (runtime-adjustable).
@@ -130,9 +141,11 @@ Exposed via `/_gateway/stats` and included in `/_gateway/health` responses.
 ### gateway/main.py — Application Entry Point
 
 FastAPI application that wires everything together:
-- Lifespan hook: creates usage index, starts metadata refresh, shuts down all httpx clients.
+- Lifespan hook: creates usage index, starts metadata refresh, starts bulk writer, shuts down all httpx clients.
 - Gateway endpoints (`/_gateway/*`): health, stats, heat, groups, sample-events, config, generate, UI.
 - Catch-all proxy route: observation pipeline for all other traffic with metrics instrumentation.
+- Shared httpx client (`_gw_client`) for gateway endpoints that query ES, avoiding per-request client creation.
+- Supports `GATEWAY_WORKERS` for multi-process parallelism via Uvicorn's `--workers` flag.
 
 ### generator/ — Traffic Generator
 
@@ -152,9 +165,14 @@ All settings are read from environment variables with defaults for local develop
 | `USAGE_INDEX` | `.usage-events` | Index name for usage events |
 | `CLUSTER_ID` | `default` | Cluster identifier in events |
 | `PROXY_TIMEOUT` | `120` | Proxy request timeout (seconds) |
+| `PROXY_BODY_LIMIT` | `1048576` | Max body size (bytes) for buffered proxy; larger bodies are streamed without extraction |
 | `EVENT_TIMEOUT` | `10` | Event emission timeout (seconds) |
 | `ANALYZER_TIMEOUT` | `30` | Heat analysis query timeout (seconds) |
 | `METADATA_REFRESH_INTERVAL` | `60` | Metadata cache refresh (seconds) |
+| `GATEWAY_WORKERS` | `1` | Number of Uvicorn worker processes (set to CPU count for production) |
+| `BULK_FLUSH_SIZE` | `100` | Max events per bulk write batch |
+| `BULK_FLUSH_INTERVAL` | `0.5` | Max seconds between bulk flushes |
+| `BULK_QUEUE_SIZE` | `5000` | Bounded event queue size (events dropped when full) |
 | `INDEX_HEAT_HOT` | `100` | Hot tier threshold (ops/hour) |
 | `INDEX_HEAT_WARM` | `10` | Warm tier threshold (ops/hour) |
 | `INDEX_HEAT_COLD` | `1` | Cold tier threshold (ops/hour) |
@@ -246,13 +264,97 @@ elastic_recommand/
     test_queries.py      # Query template and lookback tests
 ```
 
+## Production Scaling Decision Record
+
+### Context
+
+The gateway is designed for deployment on OpenShift, sitting on the hot path of all Elasticsearch traffic. The question: can the current Python/FastAPI stack handle production scale, or do we need to move to Nginx/Kong/Go?
+
+### Current Tech Stack
+
+| Layer | Technology | Role |
+|---|---|---|
+| HTTP server | Uvicorn (ASGI) | Async event loop, connection handling |
+| Framework | FastAPI | Routing, middleware, request/response handling |
+| Proxy client | httpx (AsyncClient) | Connection-pooled forwarding to ES |
+| Event emission | httpx (separate client) | Writing usage events to `.usage-events` |
+| Concurrency | asyncio (single-threaded) | Cooperative multitasking for I/O-bound work |
+| State | Module-level globals | Metrics, metadata cache, sampling config (in-memory, per-process) |
+
+### Option A: Kong/Nginx in front of Python gateway — REJECTED
+
+**Arguments for:**
+- Kong (OpenResty/Nginx) handles connection management at C speed — 100k+ concurrent connections without breaking a sweat. Python's asyncio tops out at ~10k before event loop scheduling overhead becomes measurable.
+- Kong provides rate limiting, circuit breaking, auth, and TLS termination out of the box.
+- If ES slows down and responses back up, Kong can shed load before it reaches Python.
+- Kong can health-check multiple gateway pods and route around failures.
+
+**Arguments against:**
+- OpenShift already provides this. An OpenShift Route (HAProxy-based) handles TLS termination, load balancing across pods, and connection limits. Adding Kong is a second infrastructure layer to deploy, configure, monitor, and debug.
+- Kong adds 1-3ms latency per request (extra network hop). If ES queries take 10-100ms, that's 1-10% overhead for infrastructure that duplicates OpenShift capabilities.
+- Rate limiting ES traffic is unusual — ES itself has circuit breakers and thread pool queuing. Rate limiting the gateway protects the gateway, not ES.
+- Kong requires its own backing store (Postgres or Cassandra for clustering), its own pods, its own monitoring — significant operational overhead for a single-service deployment.
+
+**Decision:** Don't introduce Kong solely for this service. OpenShift Route + HPA covers TLS, load balancing, and connection limits with zero additional infrastructure. If the organization already has Kong deployed cluster-wide, place the gateway behind it opportunistically.
+
+### Option B: Rewrite proxy layer in Go/Rust — REJECTED
+
+**Arguments for:**
+- Go is the standard language for proxies (Traefik, Caddy, CoreDNS). Goroutines are ~2KB stack vs ~8KB per Python coroutine, native concurrency without GIL, compiled speed for JSON parsing.
+- CPU-bound work on the hot path (JSON parsing, SHA-256 fingerprinting) blocks the Python event loop. In Go this would be trivially parallel across goroutines.
+- Python `json.loads` is ~3-5x slower than Go `encoding/json`. For a proxy that parses every body, this is measurable.
+- On OpenShift with resource quotas, Go pods use 2-4x less CPU and memory for equivalent throughput. Fewer pods = lower cost.
+
+**Arguments against:**
+- The bottleneck is I/O, not CPU. The dominant cost per request is waiting for ES to respond (10-100ms) and writing the event to ES (5-20ms). JSON parse + DSL walk + SHA-256 is ~0.2-1ms for a typical search body — less than 1% of wall clock time.
+- This is an observation tool, not a load balancer. A typical ES cluster serves 1k-5k rps. Python with horizontal scaling handles this comfortably.
+- The DSL extractor is ~500 lines of recursive tree walking, lookback parsing, bulk/msearch NDJSON handling. This is exactly where Python excels — the same logic in Go would be 3x the code with 3x the bug surface area.
+- A rewrite costs weeks-months and introduces new bugs in working, tested code. Adding 2 more OpenShift pods achieves the same throughput gain for zero engineering cost.
+- FastAPI/Uvicorn benchmarks (TechEmpower) show ~15k-30k req/s for JSON workloads per process. With 4 workers per pod and 3 pods = 12 processes, theoretical capacity is 180k-360k simple req/s. Even at 1/10th (proxy + parsing overhead), that's 18k-36k rps across the deployment.
+
+**Decision:** Stay with Python. The observation/extraction logic is the product's core value and Python is the right language for it. The proxy overhead is noise compared to ES response times. If the gateway ever needs to handle >50k rps, the escape hatch is a Go rewrite of the proxy layer with Python as an analysis sidecar — but that's a bridge to cross when measured, not speculated.
+
+### Option C: Harden the existing Python stack — ACCEPTED
+
+The current codebase has specific scaling bottlenecks that are implementation-level, not architectural. Fixing these keeps the tech stack while achieving production-grade throughput.
+
+| Problem | Location | Impact | Fix |
+|---|---|---|---|
+| Single-doc event writes | `events.py` `emit_event()` | 1 ES index call per request. At 1k rps = 1k writes/sec | Buffer events in-memory, flush via `_bulk` every 500ms or 100 events |
+| Unbounded background tasks | `events.py` `emit_event_background()` | No backpressure. Slow ES → unbounded task accumulation → OOM | `asyncio.Queue` with bounded size + fixed consumer pool |
+| Single Uvicorn process | `main.py` `uvicorn.run()` | Zero CPU parallelism, single event loop | Multiple workers via `--workers` flag |
+| Full body buffering | `proxy.py` `await request.body()` | Large bulk requests spike memory | httpx streaming for request/response bodies above a size threshold |
+| New httpx client per health check | `main.py` `health()` | Connection churn under monitoring | Reuse existing shared client |
+| New httpx client per sample-events call | `main.py` `sample_events()` | Same connection churn | Reuse existing shared client |
+
+### Target Deployment Architecture (OpenShift)
+
+```
+            OpenShift Route (TLS termination + load balancing)
+                            │
+              ┌─────────────┼─────────────┐
+              ▼             ▼             ▼
+         Pod (4 workers) Pod (4 workers) Pod (4 workers)
+              │             │             │
+              └─────────────┼─────────────┘
+                            ▼
+                    Elasticsearch cluster
+```
+
+- **Deployment**: 3 replicas, 4 Uvicorn workers each = 12 processes
+- **OpenShift Route**: TLS, load balancing, connection limits (no Kong needed)
+- **HPA**: Horizontal Pod Autoscaler scales pods on CPU utilization (target 70%)
+- **Resource requests**: ~500m CPU / 512Mi memory per pod
+- **Estimated throughput**: ~5k-10k rps with room to scale horizontally via HPA
+- **State model**: All state (metrics, metadata cache) is per-process and ephemeral. No shared state across pods, which is acceptable for a monitoring/observation tool.
+
 ## Known Limitations
 
 - **No authentication**: The gateway does not add auth headers. Designed for same-trust-zone deployment.
 - **No SQL query parsing**: Only DSL queries are analyzed. ES SQL queries pass through unobserved.
 - **Partial msearch support**: msearch query bodies are parsed, but per-query index targeting from headers is not tracked.
-- **No streaming**: Large responses are fully buffered. Response body parsing is capped at 10MB.
-- **Single-node**: No horizontal scaling. One gateway instance per ES cluster.
+- **No streaming**: Large request/response bodies above 1MB are streamed, but observation (field extraction) only applies to buffered bodies below the threshold.
+- **Horizontal scaling**: Supports multiple Uvicorn workers per pod and multiple pods via OpenShift HPA. State is per-process (no shared state required).
 - **No persistent queue**: Events are fire-and-forget. If the gateway crashes mid-flight, in-flight events are lost.
 
 ## Future Phases

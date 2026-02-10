@@ -1,17 +1,23 @@
 """
-Usage event model and asynchronous emission to Elasticsearch.
+Usage event model and asynchronous bulk emission to Elasticsearch.
 
-Events are emitted in the background via asyncio.create_task() after the
-response has already been sent to the client. This "fire-and-forget" pattern
-ensures that observation never delays or blocks the proxied request.
+Events are placed into a bounded asyncio.Queue by the request handler.
+A background consumer task drains the queue and flushes events to ES
+via the _bulk API — either when the batch reaches BULK_FLUSH_SIZE or
+every BULK_FLUSH_INTERVAL seconds, whichever comes first.
 
-Thread safety: All state (module globals, httpx client) is accessed from the
-single asyncio event loop thread — no locks needed. The _query_body_enabled
-and _query_body_sample_rate globals are safe to read/write under asyncio's
-cooperative scheduling model (no preemption mid-assignment).
+Backpressure: If the queue is full (BULK_QUEUE_SIZE), new events are
+dropped and counted as events_dropped. This prevents unbounded memory
+growth if ES is slow or unreachable.
 
-Lifecycle: _event_client is created at module import and must be closed via
-close_event_client() during shutdown (called from the lifespan hook in main.py).
+Thread safety: All state (module globals, httpx client, queue) is accessed
+from the single asyncio event loop thread — no locks needed. The
+_query_body_enabled and _query_body_sample_rate globals are safe to
+read/write under asyncio's cooperative scheduling model.
+
+Lifecycle: The bulk writer must be started via start_bulk_writer() during
+app startup and stopped via stop_bulk_writer() during shutdown (both
+called from the lifespan hook in main.py).
 """
 
 from __future__ import annotations
@@ -24,7 +30,11 @@ from datetime import datetime, timezone
 
 import httpx
 
-from config import ES_HOST, USAGE_INDEX, CLUSTER_ID, EVENT_SAMPLE_RATE, QUERY_BODY_ENABLED, QUERY_BODY_SAMPLE_RATE, EVENT_TIMEOUT
+from config import (
+    ES_HOST, USAGE_INDEX, CLUSTER_ID, EVENT_SAMPLE_RATE,
+    QUERY_BODY_ENABLED, QUERY_BODY_SAMPLE_RATE, EVENT_TIMEOUT,
+    BULK_FLUSH_SIZE, BULK_FLUSH_INTERVAL, BULK_QUEUE_SIZE,
+)
 from gateway.extractor import FieldRefs
 from gateway import metrics
 
@@ -77,6 +87,15 @@ def set_query_body_config(enabled: bool | None = None, sample_rate: float | None
 # Dedicated client for writing usage events — separate from the proxy client
 # to avoid contention.
 _event_client = httpx.AsyncClient(base_url=ES_HOST, timeout=EVENT_TIMEOUT)
+
+# Bounded queue for backpressure — events are dropped (not blocked) when full.
+_event_queue: asyncio.Queue | None = None
+
+# Handle to the background bulk-writer task (set by start_bulk_writer).
+_bulk_writer_task: asyncio.Task | None = None
+
+# Sentinel object placed in the queue to signal the writer to stop.
+_STOP_SENTINEL = object()
 
 # Mapping for the .usage-events index
 USAGE_INDEX_MAPPING = {
@@ -191,12 +210,142 @@ def build_event(
     }
 
 
-async def emit_event(event: dict) -> None:
-    """
-    Write a usage event to the usage index.
+# --- Bulk event writer ---
 
-    This runs as a background task — failures are logged, never raised.
+def _build_bulk_body(events: list[dict]) -> str:
+    """Build an NDJSON bulk request body from a list of event dicts."""
+    lines = []
+    for event in events:
+        lines.append(json.dumps({"index": {"_index": USAGE_INDEX}}))
+        lines.append(json.dumps(event))
+    return "\n".join(lines) + "\n"
+
+
+async def _flush_events(events: list[dict]) -> None:
+    """Flush a batch of events to ES via _bulk. Logs failures, never raises."""
+    if not events:
+        return
+    try:
+        body = _build_bulk_body(events)
+        resp = await _event_client.post(
+            "/_bulk",
+            content=body.encode(),
+            headers={"Content-Type": "application/x-ndjson"},
+        )
+        if resp.status_code in (200, 201):
+            result = resp.json()
+            error_count = sum(1 for item in result.get("items", []) if item.get("index", {}).get("error"))
+            ok_count = len(events) - error_count
+            if ok_count > 0:
+                metrics.inc_by("events_emitted", ok_count)
+            if error_count > 0:
+                metrics.inc_by("events_failed", error_count)
+                logger.warning("Bulk write: %d/%d events had errors", error_count, len(events))
+        else:
+            logger.warning("Bulk write failed: %s %s", resp.status_code, resp.text[:200])
+            metrics.inc_by("events_failed", len(events))
+    except httpx.RequestError as exc:
+        logger.warning("Bulk write failed: %s", exc)
+        metrics.inc_by("events_failed", len(events))
+
+
+async def _bulk_writer_loop() -> None:
+    """Background loop: drain queue and flush in batches.
+
+    Shutdown is signalled by placing _STOP_SENTINEL in the queue (not by
+    task cancellation). This guarantees the final flush completes without
+    being interrupted by CancelledError.
     """
+    buffer: list[dict] = []
+    stopping = False
+
+    while not stopping:
+        try:
+            # Wait for the first event or flush interval timeout
+            try:
+                item = await asyncio.wait_for(
+                    _event_queue.get(), timeout=BULK_FLUSH_INTERVAL
+                )
+                if item is _STOP_SENTINEL:
+                    stopping = True
+                else:
+                    buffer.append(item)
+            except asyncio.TimeoutError:
+                pass
+
+            # Drain remaining events from queue without blocking
+            while not stopping and len(buffer) < BULK_FLUSH_SIZE:
+                try:
+                    item = _event_queue.get_nowait()
+                    if item is _STOP_SENTINEL:
+                        stopping = True
+                    else:
+                        buffer.append(item)
+                except asyncio.QueueEmpty:
+                    break
+
+            # Flush if we have events
+            if buffer:
+                await _flush_events(buffer)
+                buffer = []
+
+        except Exception:
+            logger.exception("Unexpected error in bulk writer loop")
+            buffer = []
+
+    # Shutdown: drain any remaining events and flush
+    while not _event_queue.empty():
+        try:
+            item = _event_queue.get_nowait()
+            if item is not _STOP_SENTINEL:
+                buffer.append(item)
+        except asyncio.QueueEmpty:
+            break
+    if buffer:
+        await _flush_events(buffer)
+
+
+def start_bulk_writer() -> None:
+    """Start the background bulk writer. Call from within an async context."""
+    global _event_queue, _bulk_writer_task
+    _event_queue = asyncio.Queue(maxsize=BULK_QUEUE_SIZE)
+    loop = asyncio.get_running_loop()
+    _bulk_writer_task = loop.create_task(_bulk_writer_loop())
+    logger.info(
+        "Bulk writer started (flush_size=%d, flush_interval=%.1fs, queue_size=%d)",
+        BULK_FLUSH_SIZE, BULK_FLUSH_INTERVAL, BULK_QUEUE_SIZE,
+    )
+
+
+async def stop_bulk_writer() -> None:
+    """Stop the bulk writer gracefully, flushing remaining events."""
+    global _bulk_writer_task
+    if _bulk_writer_task is not None and _event_queue is not None:
+        # Signal the writer to stop via sentinel (not cancellation)
+        try:
+            _event_queue.put_nowait(_STOP_SENTINEL)
+        except asyncio.QueueFull:
+            # Queue is full — cancel as fallback
+            _bulk_writer_task.cancel()
+        await _bulk_writer_task
+        _bulk_writer_task = None
+    logger.info("Bulk writer stopped")
+
+
+def emit_event_background(event: dict) -> None:
+    """Enqueue an event for bulk writing. Drops if queue is full."""
+    if _event_queue is None:
+        logger.debug("Bulk writer not started — dropping event")
+        return
+    try:
+        _event_queue.put_nowait(event)
+    except asyncio.QueueFull:
+        metrics.inc("events_dropped")
+        logger.debug("Event queue full — dropping event")
+
+
+async def emit_event(event: dict) -> None:
+    """Write a single event directly (bypasses bulk writer). Used for testing."""
     try:
         resp = await _event_client.post(
             f"/{USAGE_INDEX}/_doc",
@@ -215,15 +364,7 @@ async def emit_event(event: dict) -> None:
         metrics.inc("events_failed")
 
 
-def emit_event_background(event: dict) -> None:
-    """Schedule event emission as a fire-and-forget background task."""
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(emit_event(event))
-    except RuntimeError:
-        logger.debug("No event loop available for background emission")
-
-
 async def close_event_client() -> None:
     """Close the event client. Called during gateway shutdown."""
+    await stop_bulk_writer()
     await _event_client.aclose()
