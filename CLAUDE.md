@@ -64,6 +64,64 @@ Types: `feat`, `fix`, `refactor`, `docs`, `chore`
 - Docker volumes / ES data
 - IDE config (`.vscode/`, `.idea/`)
 
+## Operational Gotchas
+
+### Gateway restart required for Python changes
+
+All Python code (`main.py`, `extractor.py`, `events.py`, `mapping_diff.py`, etc.) requires a **gateway process restart** to take effect. The only exception is `gateway/ui.html`, which is read from disk on each request.
+
+If you add a new endpoint, change extraction logic, or modify any `.py` file — kill the running gateway and restart it before testing. Otherwise the old code is still running and you'll get confusing results (e.g., new routes returning ES errors because the catch-all proxy forwards them to Elasticsearch).
+
+On Windows:
+```powershell
+# Find the PID
+Get-NetTCPConnection -LocalPort 9301 | Select-Object OwningProcess -Unique
+# Kill it
+Stop-Process -Id <PID> -Force
+# Restart
+python -m gateway.main  # or run in background
+```
+
+### Run `kibana_setup.py` after changing dashboards
+
+Dashboard definitions in `kibana_setup.py` are declarative — they only take effect when you run the script to import them into Kibana. Editing the file alone does nothing.
+
+```bash
+python kibana_setup.py --no-wait
+```
+
+Always run this after modifying any visualization, dashboard, or control definition. The script uses `overwrite=true` so it's safe to re-run.
+
+### PowerShell `curl` alias
+
+On Windows, PowerShell aliases `curl` to `Invoke-WebRequest`, which has different syntax. Always use `curl.exe` explicitly:
+```powershell
+curl.exe -X POST http://localhost:9301/_gateway/mapping-diff/refresh
+```
+
+## Planning Rules
+
+### Trace every field to the user-facing layer
+
+When adding a field to an ES index (e.g., `last_seen` in `.mapping-diff`), the plan **must** specify how it surfaces in Kibana — which dashboard, which panel, which column, which metric type. Data that exists in the index but isn't visible in a dashboard is invisible to users and effectively doesn't exist.
+
+**Checklist for new fields:**
+1. ES index mapping — field name, type
+2. Code that writes the field — which function, what value
+3. Kibana visualization — which panel shows it, what agg type (`max`, `avg`, `terms`, etc.)
+4. Dashboard placement — where on the grid, panel title
+
+### Walk the user workflow end-to-end before marking done
+
+Before marking a deliverable complete, walk through the user's workflow from start to finish:
+- "I open the dashboard → I see X → I click/filter → I see Y → I can act on Z"
+
+If any step requires manual workaround (e.g., "go to Discover and type this KQL query"), it's not done — build the dashboard or control that eliminates the manual step.
+
+### Include everything discussed before planning
+
+When creating an implementation plan, review all discussion points from the conversation and ensure each one maps to a concrete step. Agreed-upon features that aren't in the plan won't get implemented.
+
 ## Kibana Dashboards
 
 Dashboards are the primary way users consume this tool's output. They should be **self-explanatory** — a new team member opening the dashboard for the first time should understand what they're looking at without reading docs or asking someone.
