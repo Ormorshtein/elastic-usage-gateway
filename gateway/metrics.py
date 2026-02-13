@@ -20,6 +20,8 @@ _counters = {
     "extraction_errors": 0,
     "metadata_refresh_ok": 0,
     "metadata_refresh_failed": 0,
+    "mapping_diff_refresh_ok": 0,
+    "mapping_diff_refresh_failed": 0,
 }
 
 # Timing trackers: each has its own count so avg is independent of counters.

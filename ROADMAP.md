@@ -100,16 +100,19 @@ New panels in the "Query Patterns" section:
 ---
 
 ## Deliverable 5: Mapping Diff (Feature 3)
-**Status: [ ] NOT STARTED**
+**Status: [x] DONE (2026-02-13)**
 
 **Value:** Core promise of the project — comparing what's in the mapping vs what's actually used. "Field X has an inverted index but is never queried." Unlocks recommendations, CI/CD validation, alerting, and lineage.
 
 **Scope:**
-- New `gateway/mapping_cache.py` — fetch + flatten index mappings
-- New endpoint: `GET /_gateway/mapping-diff`
-- Field classification (write-only, sourced-only, unused, etc.)
+- New `gateway/mapping_diff.py` — fetch + flatten index mappings, query usage, classify fields, background refresh loop
+- Results written to `.mapping-diff` ES index (no JSON API endpoint — Kibana visualizes)
+- Field classification: `active`, `sourced_only`, `write_only`, `unused`
+- Per-field `last_seen` timestamps and reference counts across all 6 usage categories
+- New Kibana "Mapping Diff" dashboard with 6 panels + index_group filter
 
-**Files:** `gateway/mapping_cache.py` (new), `gateway/metadata.py`, `gateway/main.py`, tests
+**Files changed:** `gateway/mapping_diff.py` (new), `tests/test_mapping_diff.py` (new), `config.py`, `gateway/main.py`, `gateway/metrics.py`, `kibana_setup.py`
+**Tests added:** 48 new (264 total)
 **Depends on:** Deliverables 1-2 for accurate usage data
 
 ---
@@ -164,8 +167,8 @@ D2 (Heat Scoring) ✅
 D3 (Templates) ✅
 D4 (Clients) ────────── standalone, can start now
 
-D5 (Mapping Diff) ──── after D1-D2 ✅ — ready to start
-D6 (Recommendations) ─ after D5
+D5 (Mapping Diff) ✅
+D6 (Recommendations) ─ after D5 ✅ — ready to start
 D7 (Painless) ───────── standalone, can start now
 
 CI/CD Validation ───── after D3 + D4 + D5

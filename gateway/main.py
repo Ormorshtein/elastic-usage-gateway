@@ -31,6 +31,8 @@ from gateway.events import build_event, emit_event, emit_event_background, ensur
 from gateway.ui import load_html
 from gateway import metadata as metadata_mod
 from gateway.metadata import close_metadata_client
+from gateway import mapping_diff as mapping_diff_mod
+from gateway.mapping_diff import close_diff_client
 from gateway import metrics
 import random
 from generator.queries import SCENARIOS
@@ -68,12 +70,18 @@ async def lifespan(app: FastAPI):
         logger.warning("Could not ensure usage index at startup — will retry on first event")
     metadata_mod.start_refresh_loop()
     start_bulk_writer()
+    try:
+        await mapping_diff_mod.ensure_diff_index()
+    except Exception:
+        logger.warning("Could not ensure mapping diff index at startup — will retry on first refresh")
+    mapping_diff_mod.start_diff_loop()
     logger.info("Gateway ready — proxying to Elasticsearch")
     yield
     logger.info("Gateway shutting down — closing clients")
     await close_event_client()
     await close_proxy_client()
     await close_metadata_client()
+    await close_diff_client()
     await _gw_client.aclose()
 
 
@@ -134,6 +142,13 @@ async def reset_metrics():
     """Reset all in-memory counters and timings to zero."""
     metrics.reset()
     return {"status": "ok", "message": "All metrics reset to zero"}
+
+
+@app.post("/_gateway/mapping-diff/refresh")
+async def refresh_mapping_diff():
+    """Trigger an immediate mapping diff refresh (instead of waiting for the next scheduled cycle)."""
+    await mapping_diff_mod.refresh()
+    return {"status": "ok"}
 
 
 @app.get("/_gateway/config")
