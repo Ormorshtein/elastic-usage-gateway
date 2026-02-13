@@ -827,6 +827,17 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     # =========================================================
 
     objects.append(_markdown(
+        "md-header-multi-index", "Section: Multi-Index Comparison",
+        "## Multi-Index Heat Comparison\n"
+        "Side-by-side comparison of traffic volume, operation mix, and response time across all index groups.\n\n"
+        "**How to act on this:**\n"
+        "- **Index groups with disproportionately high traffic** relative to their data size may need more replicas or dedicated nodes.\n"
+        "- **Groups with high avg response time** are candidates for query optimization, shard rebalancing, or mapping changes.\n"
+        "- **Compare operation types per group** — a group dominated by writes may benefit from different refresh/flush settings than a read-heavy one.\n"
+        "- **Lookback differences** between groups inform per-group ILM policies — groups queried over short windows can move older data to cold tiers sooner.",
+    ))
+
+    objects.append(_markdown(
         "md-header-diff-overview", "Section: Mapping Diff Overview",
         "## Mapping vs. Usage Diff\n"
         "Every field in your index mappings compared against actual usage from traffic. "
@@ -1162,69 +1173,69 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
 
     # Usage & Heat dashboard (with native index_group control at top)
     #
-    # Layout rows (each section preceded by a 5-unit Markdown header):
+    # Layout rows (each section preceded by a 10-unit Markdown header):
     #   y=0:   [header] Overview
-    #   y=5:   index groups, ops over time, query types
-    #   y=17:  [header] Field Heat by Count
-    #   y=22:  top queried/filtered/aggregated
-    #   y=36:  top sorted/sourced + avg response time
-    #   y=48:  [header] Field Heat by Response Time
-    #   y=53:  queried/filtered/aggregated (time-weighted)
-    #   y=67:  sorted/sourced (time-weighted)
-    #   y=79:  [header] Query Patterns
-    #   y=84:  top templates, templates over time
-    #   y=98:  costliest templates, templates by group
-    #   y=110: [header] Client Attribution
-    #   y=115: top clients, clients by IP, user-agents
-    #   y=129: clients by group, fields by client
-    #   y=143: [header] Lookback Analysis
-    #   y=148: lookback distribution, lookback fields
-    #   y=162: [header] Raw Events
-    #   y=167: raw events table
+    #   y=10:  index groups, ops over time, query types
+    #   y=22:  [header] Field Heat by Count
+    #   y=32:  top queried/filtered/aggregated
+    #   y=46:  top sorted/sourced + avg response time
+    #   y=58:  [header] Field Heat by Response Time
+    #   y=68:  queried/filtered/aggregated (time-weighted)
+    #   y=82:  sorted/sourced (time-weighted)
+    #   y=94:  [header] Query Patterns
+    #   y=104: top templates, templates over time
+    #   y=118: costliest templates, templates by group
+    #   y=130: [header] Client Attribution
+    #   y=140: top clients, clients by IP, user-agents
+    #   y=154: clients by group, fields by client
+    #   y=168: [header] Lookback Analysis
+    #   y=178: lookback distribution, lookback fields
+    #   y=192: [header] Raw Events
+    #   y=202: raw events table
     control_input, control_refs = _control_group_input(usage_dv_id)
     usage_panels = [
         # --- Section: Overview ---
-        panel_ref(0,  "md-header-overview",          0,  0, 48,  5),
-        panel_ref(1,  "vis-concrete-indices",         0,  5, 18, 12),
-        panel_ref(2,  "vis-ops-over-time",           18,  5, 18, 12),
-        panel_ref(3,  "vis-query-types",             36,  5, 12, 12),
+        panel_ref(0,  "md-header-overview",          0,   0, 48, 10),
+        panel_ref(1,  "vis-concrete-indices",         0,  10, 18, 12),
+        panel_ref(2,  "vis-ops-over-time",           18,  10, 18, 12),
+        panel_ref(3,  "vis-query-types",             36,  10, 12, 12),
         # --- Section: Field Heat by Count ---
-        panel_ref(4,  "md-header-field-heat-count",   0, 17, 48,  5),
-        panel_ref(5,  "vis-top-queried",              0, 22, 16, 14),
-        panel_ref(6,  "vis-top-filtered",            16, 22, 16, 14),
-        panel_ref(7,  "vis-top-aggregated",          32, 22, 16, 14),
-        panel_ref(8,  "vis-top-sorted",               0, 36, 16, 12),
-        panel_ref(9,  "vis-top-sourced",             16, 36, 16, 12),
-        panel_ref(10, "vis-response-time",           32, 36, 16, 12),
+        panel_ref(4,  "md-header-field-heat-count",   0,  22, 48, 10),
+        panel_ref(5,  "vis-top-queried",              0,  32, 16, 14),
+        panel_ref(6,  "vis-top-filtered",            16,  32, 16, 14),
+        panel_ref(7,  "vis-top-aggregated",          32,  32, 16, 14),
+        panel_ref(8,  "vis-top-sorted",               0,  46, 16, 12),
+        panel_ref(9,  "vis-top-sourced",             16,  46, 16, 12),
+        panel_ref(10, "vis-response-time",           32,  46, 16, 12),
         # --- Section: Field Heat by Response Time ---
-        panel_ref(11, "md-header-field-heat-time",    0, 48, 48,  5),
-        panel_ref(12, "vis-rt-queried",               0, 53, 16, 14),
-        panel_ref(13, "vis-rt-filtered",             16, 53, 16, 14),
-        panel_ref(14, "vis-rt-aggregated",           32, 53, 16, 14),
-        panel_ref(15, "vis-rt-sorted",                0, 67, 16, 12),
-        panel_ref(16, "vis-rt-sourced",              16, 67, 16, 12),
+        panel_ref(11, "md-header-field-heat-time",    0,  58, 48, 10),
+        panel_ref(12, "vis-rt-queried",               0,  68, 16, 14),
+        panel_ref(13, "vis-rt-filtered",             16,  68, 16, 14),
+        panel_ref(14, "vis-rt-aggregated",           32,  68, 16, 14),
+        panel_ref(15, "vis-rt-sorted",                0,  82, 16, 12),
+        panel_ref(16, "vis-rt-sourced",              16,  82, 16, 12),
         # --- Section: Query Patterns ---
-        panel_ref(17, "md-header-query-patterns",     0, 79, 48,  5),
-        panel_ref(18, "vis-top-templates",            0, 84, 24, 14),
-        panel_ref(19, "vis-templates-over-time",     24, 84, 24, 14),
-        panel_ref(20, "vis-costliest-templates",      0, 98, 24, 12),
-        panel_ref(21, "vis-templates-by-group",      24, 98, 24, 12),
+        panel_ref(17, "md-header-query-patterns",     0,  94, 48, 10),
+        panel_ref(18, "vis-top-templates",            0, 104, 24, 14),
+        panel_ref(19, "vis-templates-over-time",     24, 104, 24, 14),
+        panel_ref(20, "vis-costliest-templates",      0, 118, 24, 12),
+        panel_ref(21, "vis-templates-by-group",      24, 118, 24, 12),
         # --- Section: Client Attribution ---
-        panel_ref(22, "md-header-client-attribution",  0, 110, 48,  5),
-        panel_ref(23, "vis-top-clients",               0, 115, 16, 14),
-        panel_ref(24, "vis-clients-by-ip",            16, 115, 16, 14),
-        panel_ref(25, "vis-client-user-agents",       32, 115, 16, 14),
-        panel_ref(26, "vis-clients-by-group",          0, 129, 24, 14),
-        panel_ref(27, "vis-fields-by-client",         24, 129, 24, 14),
+        panel_ref(22, "md-header-client-attribution",  0, 130, 48, 10),
+        panel_ref(23, "vis-top-clients",               0, 140, 16, 14),
+        panel_ref(24, "vis-clients-by-ip",            16, 140, 16, 14),
+        panel_ref(25, "vis-client-user-agents",       32, 140, 16, 14),
+        panel_ref(26, "vis-clients-by-group",          0, 154, 24, 14),
+        panel_ref(27, "vis-fields-by-client",         24, 154, 24, 14),
         # --- Section: Lookback Analysis ---
-        panel_ref(28, "md-header-lookback",            0, 143, 48,  5),
-        panel_ref(29, "vis-lookback-distribution",     0, 148, 24, 14),
-        panel_ref(30, "vis-lookback-fields",          24, 148, 24, 14),
+        panel_ref(28, "md-header-lookback",            0, 168, 48, 10),
+        panel_ref(29, "vis-lookback-distribution",     0, 178, 24, 14),
+        panel_ref(30, "vis-lookback-fields",          24, 178, 24, 14),
         # --- Section: Raw Events ---
-        panel_ref(31, "md-header-raw-events",          0, 162, 48,  5),
+        panel_ref(31, "md-header-raw-events",          0, 192, 48, 10),
         {
             "panelIndex": "32",
-            "gridData": {"x": 0, "y": 167, "w": 48, "h": 18, "i": "32"},
+            "gridData": {"x": 0, "y": 202, "w": 48, "h": 18, "i": "32"},
             "version": "8.12.2",
             "type": "search",
             "panelRefName": "panel_32",
@@ -1286,20 +1297,22 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     # Multi-Index Comparison dashboard (using index_group native control)
     comp_control_input, comp_control_refs = _control_group_input(usage_dv_id)
     comparison_panels = [
-        panel_ref(0, "vis-ops-by-index",               0,  0, 24, 14),
-        panel_ref(1, "vis-ops-by-index-operation",    24,  0, 24, 14),
-        panel_ref(2, "vis-ops-over-time-by-index",     0, 14, 32, 14),
-        panel_ref(3, "vis-response-time-by-index",    32, 14, 16, 14),
-        panel_ref(4, "vis-lookback-by-group",          0, 28, 24, 14),   # avg lookback by group
-        panel_ref(5, "vis-concrete-indices-comparison", 24, 28, 24, 14),
+        panel_ref(0, "md-header-multi-index",          0,  0, 48, 10),
+        panel_ref(1, "vis-ops-by-index",               0, 10, 24, 14),
+        panel_ref(2, "vis-ops-by-index-operation",    24, 10, 24, 14),
+        panel_ref(3, "vis-ops-over-time-by-index",     0, 24, 32, 14),
+        panel_ref(4, "vis-response-time-by-index",    32, 24, 16, 14),
+        panel_ref(5, "vis-lookback-by-group",          0, 38, 24, 14),   # avg lookback by group
+        panel_ref(6, "vis-concrete-indices-comparison", 24, 38, 24, 14),
     ]
     comparison_refs = [
-        {"name": "panel_0", "type": "visualization", "id": "vis-ops-by-index"},
-        {"name": "panel_1", "type": "visualization", "id": "vis-ops-by-index-operation"},
-        {"name": "panel_2", "type": "visualization", "id": "vis-ops-over-time-by-index"},
-        {"name": "panel_3", "type": "visualization", "id": "vis-response-time-by-index"},
-        {"name": "panel_4", "type": "visualization", "id": "vis-lookback-by-group"},
-        {"name": "panel_5", "type": "visualization", "id": "vis-concrete-indices-comparison"},
+        {"name": "panel_0", "type": "visualization", "id": "md-header-multi-index"},
+        {"name": "panel_1", "type": "visualization", "id": "vis-ops-by-index"},
+        {"name": "panel_2", "type": "visualization", "id": "vis-ops-by-index-operation"},
+        {"name": "panel_3", "type": "visualization", "id": "vis-ops-over-time-by-index"},
+        {"name": "panel_4", "type": "visualization", "id": "vis-response-time-by-index"},
+        {"name": "panel_5", "type": "visualization", "id": "vis-lookback-by-group"},
+        {"name": "panel_6", "type": "visualization", "id": "vis-concrete-indices-comparison"},
     ] + comp_control_refs
     objects.append({
         "id": "multi-index-comparison",
@@ -1322,12 +1335,12 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     # Mapping Diff dashboard
     diff_control_input, diff_control_refs = _control_group_input(diff_dv_id)
     diff_panels = [
-        panel_ref(0, "md-header-diff-overview",  0,  0, 48,  5),
-        panel_ref(1, "vis-diff-classification",   0,  5, 16, 14),
-        panel_ref(2, "vis-diff-by-group",        16,  5, 32, 14),
-        panel_ref(3, "vis-diff-fields-table",     0, 19, 48, 20),
-        panel_ref(4, "vis-diff-unused",           0, 39, 36, 16),
-        panel_ref(5, "vis-diff-types",           36, 39, 12, 16),
+        panel_ref(0, "md-header-diff-overview",  0,  0, 48, 10),
+        panel_ref(1, "vis-diff-classification",   0, 10, 16, 14),
+        panel_ref(2, "vis-diff-by-group",        16, 10, 32, 14),
+        panel_ref(3, "vis-diff-fields-table",     0, 24, 48, 20),
+        panel_ref(4, "vis-diff-unused",           0, 44, 36, 16),
+        panel_ref(5, "vis-diff-types",           36, 44, 12, 16),
     ]
     diff_refs = [
         {"name": "panel_0", "type": "visualization", "id": "md-header-diff-overview"},
