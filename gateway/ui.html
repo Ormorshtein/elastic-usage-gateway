@@ -190,12 +190,15 @@
       <div class="stat-box"><div class="stat-label">Index groups</div><div class="stat-value" id="st-groups">-</div></div>
       <div class="stat-box"><div class="stat-label">Metadata refreshes</div><div class="stat-value" id="st-metadata-refresh-ok">-</div></div>
       <div class="stat-box"><div class="stat-label">Metadata failures</div><div class="stat-value" id="st-metadata-refresh-failed">-</div></div>
+      <div class="stat-box"><div class="stat-label">Mapping diff refreshes</div><div class="stat-value" id="st-mapping-diff-ok">-</div></div>
+      <div class="stat-box"><div class="stat-label">Mapping diff failures</div><div class="stat-value" id="st-mapping-diff-failed">-</div></div>
     </div>
   </div>
 
-  <div style="display:flex; align-items:center; gap:12px; margin-top:12px;">
+  <span class="refresh-hint">Stats auto-refresh every 5 seconds</span>
+  <div style="display:flex; align-items:center; gap:12px; margin-top:8px;">
     <button class="btn-clear" id="btn-reset-metrics" onclick="resetMetrics()">Reset Metrics</button>
-    <span class="refresh-hint">Auto-refreshes every 5 seconds</span>
+    <button class="btn-run" id="btn-refresh-diff" onclick="refreshMappingDiff()">Refresh Mapping Diff</button>
   </div>
 </div>
 
@@ -536,6 +539,8 @@ async function refreshStats() {
     set('st-extraction-errors', data.extraction_errors || 0, true);
     set('st-metadata-refresh-ok', data.metadata_refresh_ok || 0);
     set('st-metadata-refresh-failed', data.metadata_refresh_failed || 0, true);
+    set('st-mapping-diff-ok', data.mapping_diff_refresh_ok || 0);
+    set('st-mapping-diff-failed', data.mapping_diff_refresh_failed || 0, true);
     set('st-es-time-avg', (data.es_time_avg_ms || 0) + 'ms');
     set('st-es-time-max', (data.es_time_max_ms || 0) + 'ms');
     set('st-request-time-avg', (data.request_time_avg_ms || 0) + 'ms');
@@ -559,6 +564,27 @@ async function resetMetrics() {
     console.warn('Failed to reset metrics:', e);
   }
   btn.disabled = false;
+}
+
+async function refreshMappingDiff() {
+  const btn = document.getElementById('btn-refresh-diff');
+  btn.disabled = true;
+  btn.textContent = 'Refreshing...';
+  try {
+    const resp = await fetch('/_gateway/mapping-diff/refresh', { method: 'POST' });
+    if (resp.ok) {
+      btn.textContent = 'Done!';
+      refreshStats();
+      setTimeout(() => { btn.textContent = 'Refresh Mapping Diff'; btn.disabled = false; }, 2000);
+    } else {
+      btn.textContent = 'Failed';
+      setTimeout(() => { btn.textContent = 'Refresh Mapping Diff'; btn.disabled = false; }, 2000);
+    }
+  } catch (e) {
+    console.warn('Failed to refresh mapping diff:', e);
+    btn.textContent = 'Error';
+    setTimeout(() => { btn.textContent = 'Refresh Mapping Diff'; btn.disabled = false; }, 2000);
+  }
 }
 
 async function loadConfig() {

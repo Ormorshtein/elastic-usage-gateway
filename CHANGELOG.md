@@ -4,6 +4,48 @@ Reverse-chronological record of significant changes, decisions, and lessons lear
 
 ---
 
+## 2026-02-13 — Field Drill-Down Dashboard
+
+Added a dedicated Kibana dashboard for per-field usage investigation. Instead of telling users to manually filter in Discover, the gateway now ships a ready-made "Field Drill-Down" dashboard with controls and pre-built panels.
+
+**What changed:**
+- New "Field Drill-Down — Who Uses This Field?" Kibana dashboard (`field-drilldown`)
+- 4 controls at the top: Index Group, Queried Field, Filtered Field, Aggregated Field
+- 8 panels: usage over time (area), operations breakdown (pie), clients table, client IPs table, user-agents (pie), query templates table, response time over time (line), raw events
+- Updated Mapping Diff dashboard markdown to reference the new drill-down dashboard
+- Default time range is 7 days (longer than other dashboards, since drill-down often needs more history)
+
+**How it works:** User selects a field name in one of the category dropdowns (e.g., "price" in "Queried Field"). All panels filter to events that reference that field, showing who queries it, when, with which templates, and the response time impact. For cross-category search, the KQL bar accepts `fields.queried: "price" OR fields.filtered: "price" OR ...`.
+
+**Files changed:** `kibana_setup.py`
+
+---
+
+## 2026-02-13 — Deliverable 5: Mapping Diff Engine
+
+Added mapping-vs-usage comparison engine. The gateway now periodically fetches index mappings, cross-references them against actual field usage from `.usage-events`, classifies every mapped field, and writes results to the `.mapping-diff` index. A new Kibana dashboard visualizes field classifications, unused fields, and type distributions.
+
+**What changed:**
+- New `gateway/mapping_diff.py` — mapping flattener, usage aggregation, field classification, background refresh loop
+- New `.mapping-diff` ES index (one doc per field per index group, latest snapshot)
+- New Kibana "Mapping Diff" dashboard with 6 panels: classification pie chart, classification by group bar chart, full field detail table, unused fields table, type distribution pie chart, plus markdown guidance header
+- New config vars: `MAPPING_DIFF_REFRESH_INTERVAL` (default 300s), `MAPPING_DIFF_LOOKBACK_HOURS` (default 168h / 7 days)
+
+**Classification rules:**
+- `active` — field is queried, filtered, aggregated, or sorted
+- `sourced_only` — field is fetched in `_source` but never used in query/filter/agg/sort
+- `write_only` — field is written but never read
+- `unused` — zero references in any category within the lookback window
+
+**Per-field tracking:** Each field records `last_seen` timestamps and reference counts for all 6 usage categories (queried, filtered, aggregated, sorted, sourced, written). The overall `last_seen` is the max across all categories. This enables drill-down from the Kibana dashboard to see exactly when and how a field was last used.
+
+**Design decision:** No JSON API endpoint. Following the same pattern as the analyzer.py removal — code computes the diff and writes results to an ES index, Kibana visualizes it. Users interact with the data in the same tool they already use.
+
+**Files changed:** `gateway/mapping_diff.py` (new), `tests/test_mapping_diff.py` (new), `config.py`, `gateway/main.py`, `gateway/metrics.py`, `kibana_setup.py`, `ARCHITECTURE.md`, `ROADMAP.md`
+**Tests added:** 48 new (264 total)
+
+---
+
 ## 2026-02-13 — Remove Analysis Endpoints, Deliver Insights via Kibana Dashboards
 
 Removed both `GET /_gateway/heat` and `GET /_gateway/query-patterns` JSON endpoints. All analysis is now delivered through **Kibana dashboards** with inline guidance text in Markdown panels. Deleted `gateway/analyzer.py` entirely.

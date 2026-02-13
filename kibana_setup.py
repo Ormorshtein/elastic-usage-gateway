@@ -9,6 +9,8 @@ Dashboards created:
   1. Products Explorer       — data table of seeded products
   2. Usage & Heat            — query traffic patterns + field heat (with index_group filter)
   3. Multi-Index Comparison  — cross-index-group heat and operations
+  4. Mapping Diff            — field usage vs. mapping comparison (from .mapping-diff index)
+  5. Field Drill-Down        — per-field usage investigation (clients, templates, response time)
 
 Usage:
     python kibana_setup.py
@@ -209,7 +211,7 @@ def _control_group_input(data_view_id: str) -> tuple[dict, list[dict]]:
     return control_input, refs
 
 
-def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, orders_dv_id: str) -> list[dict]:
+def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, orders_dv_id: str, diff_dv_id: str = "dv-mapping-diff") -> list[dict]:
     """Build all visualization + dashboard saved objects."""
     objects = []
 
@@ -821,6 +823,305 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     ))
 
     # =========================================================
+    # MAPPING DIFF VISUALIZATIONS
+    # =========================================================
+
+    objects.append(_markdown(
+        "md-header-diff-overview", "Section: Mapping Diff Overview",
+        "## Mapping vs. Usage Diff\n"
+        "Every field in your index mappings compared against actual usage from traffic. "
+        "Fields are classified as **active** (queried/filtered/aggregated/sorted), "
+        "**sourced_only** (fetched in `_source` but never queried), "
+        "**write_only** (indexed but never read), or **unused** (zero references). "
+        "The **Last Seen** column shows when the field was last referenced — use it to prioritize which fields to investigate first.\n\n"
+        "**How to act on this:**\n"
+        "- **Unused keyword/numeric fields** with `is_indexed: true` → set `index: false` to save indexing CPU and disk.\n"
+        "- **Unused text fields** → remove the field or its `.keyword` multi-field to save significant disk.\n"
+        "- **Write-only fields** → data is being indexed but never searched — consider `index: false` + `doc_values: false`.\n"
+        "- **Sourced-only fields** → fetched in responses but never used in queries — set `index: false`, keep `doc_values` if needed for sorts/aggs.\n\n"
+        "**Drill-down per field:** Open the **Field Drill-Down** dashboard, select the field name "
+        "in one of the category dropdowns (Queried, Filtered, or Aggregated), and see who uses it, "
+        "when it was last accessed, which query templates reference it, and the response time impact.",
+    ))
+
+    objects.append(_vis(
+        "vis-diff-classification", "Field Classification Breakdown", "pie",
+        {"type": "pie", "addTooltip": True, "addLegend": True,
+         "legendPosition": "right", "isDonut": True,
+         "labels": {"show": True, "values": True, "last_level": True, "truncate": 100}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "classification", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+        ],
+        diff_dv_id,
+    ))
+
+    DIFF_BAR_AXES = {
+        "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "left",
+                          "show": True, "style": {}, "scale": {"type": "linear"},
+                          "labels": {"show": True, "filter": True, "truncate": 100}, "title": {}}],
+        "valueAxes": [{"id": "ValueAxis-1", "name": "BottomAxis-1", "type": "value",
+                       "position": "bottom", "show": True, "style": {},
+                       "scale": {"type": "linear", "mode": "normal"},
+                       "labels": {"show": True, "rotate": 0, "filter": False, "truncate": 100},
+                       "title": {"text": "Field Count"}}],
+    }
+    objects.append(_vis(
+        "vis-diff-by-group", "Field Classification by Index Group", "horizontal_bar",
+        {"type": "horizontal_bar", "grid": {"categoryLines": False}, **DIFF_BAR_AXES,
+         "seriesParams": [{"show": True, "type": "histogram", "mode": "stacked",
+                           "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Count", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2,
+                           "showCircles": True}],
+         "addTooltip": True, "addLegend": True, "legendPosition": "right",
+         "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "index_group", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "classification", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "group"},
+        ],
+        diff_dv_id,
+    ))
+
+    objects.append(_vis(
+        "vis-diff-fields-table", "All Fields — Mapping vs. Usage", "table",
+        {**TABLE_PARAMS, "perPage": 25, "totalFunc": "count"},
+        [
+            {"id": "1", "enabled": True, "type": "max",
+             "params": {"field": "total_references"}, "schema": "metric"},
+            {"id": "6", "enabled": True, "type": "max",
+             "params": {"field": "last_seen", "customLabel": "Last Seen"}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "index_group", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "field_name", "size": 200,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "4", "enabled": True, "type": "terms",
+             "params": {"field": "classification", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "5", "enabled": True, "type": "terms",
+             "params": {"field": "mapped_type", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+        ],
+        diff_dv_id,
+    ))
+
+    objects.append(_vis(
+        "vis-diff-unused", "Unused Fields (Optimization Candidates)", "table",
+        {**TABLE_PARAMS, "perPage": 25},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "6", "enabled": True, "type": "max",
+             "params": {"field": "last_seen", "customLabel": "Last Seen"}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "index_group", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "field_name", "size": 200,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "4", "enabled": True, "type": "terms",
+             "params": {"field": "mapped_type", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "5", "enabled": True, "type": "terms",
+             "params": {"field": "is_indexed", "size": 5,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+        ],
+        diff_dv_id,
+        search_query="classification: unused",
+    ))
+
+    objects.append(_vis(
+        "vis-diff-types", "Field Type Distribution", "pie",
+        {"type": "pie", "addTooltip": True, "addLegend": True,
+         "legendPosition": "right", "isDonut": True,
+         "labels": {"show": True, "values": True, "last_level": True, "truncate": 100}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "mapped_type", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+        ],
+        diff_dv_id,
+    ))
+
+    # =========================================================
+    # FIELD DRILL-DOWN VISUALIZATIONS
+    # =========================================================
+    # Used on the "Field Drill-Down" dashboard. Users pick a field name
+    # via controls; all panels filter to events referencing that field.
+
+    objects.append(_markdown(
+        "md-header-field-drilldown", "Section: Field Drill-Down",
+        "## Field Drill-Down\n"
+        "Investigate a specific field's usage: who queries it, when, with which query patterns, and how fast.\n\n"
+        "**How to use this dashboard:**\n"
+        "1. Select an **Index Group** to focus on one index.\n"
+        "2. Pick a field name in **one** of the category dropdowns (Queried, Filtered, or Aggregated) "
+        "to filter to events that reference that field.\n"
+        "3. All panels below update to show only events matching your selection.\n\n"
+        "**Cross-category search:** The dropdowns filter one category at a time. "
+        "To find a field across ALL categories (queried + filtered + aggregated + sorted + sourced), "
+        "use the KQL query bar at the top:\n\n"
+        "`fields.queried: \"price\" OR fields.filtered: \"price\" OR fields.aggregated: \"price\" "
+        "OR fields.sorted: \"price\" OR fields.sourced: \"price\"`\n\n"
+        "**Tip:** Come here from the *Mapping Diff* dashboard — pick a field classified as "
+        "*unused* or *sourced_only* and verify whether it's truly safe to remove by checking who depends on it.",
+    ))
+
+    # Usage Over Time — when was this field used
+    objects.append(_vis(
+        "vis-drilldown-usage-time", "Field Usage Over Time", "area",
+        {"type": "area", "grid": {"categoryLines": False}, **AREA_AXES,
+         "seriesParams": [{"show": True, "type": "area", "mode": "stacked", "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Count", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2,
+                           "showCircles": True, "interpolate": "linear"}],
+         "addTooltip": True, "addLegend": True, "legendPosition": "right",
+         "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "date_histogram",
+             "params": {"field": "timestamp", "useNormalizedEsInterval": True,
+                        "scaleMetricValues": False, "interval": "auto",
+                        "drop_partials": False, "min_doc_count": 1,
+                        "extended_bounds": {}},
+             "schema": "segment"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Operations breakdown
+    objects.append(_vis(
+        "vis-drilldown-operations", "Operations Breakdown", "pie",
+        {"type": "pie", "addTooltip": True, "addLegend": True, "legendPosition": "right", "isDonut": True,
+         "labels": {"show": True, "values": True, "last_level": True, "truncate": 100}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "operation", "size": 10, "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Clients using this field
+    objects.append(_vis(
+        "vis-drilldown-clients", "Clients Using This Field", "table",
+        {**TABLE_PARAMS, "percentageCol": "Count"},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "avg",
+             "params": {"field": "response_time_ms"}, "schema": "metric"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "client_id", "size": 20,
+                        "order": "desc", "orderBy": "1",
+                        "missingBucket": True, "missingBucketLabel": "(no x-client-id)"},
+             "schema": "bucket"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Client IPs
+    objects.append(_vis(
+        "vis-drilldown-client-ips", "Client IPs Using This Field", "table",
+        {**TABLE_PARAMS, "percentageCol": "Count"},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "cardinality",
+             "params": {"field": "client_user_agent"}, "schema": "metric"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "client_ip", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # User-Agent breakdown
+    objects.append(_vis(
+        "vis-drilldown-user-agents", "User-Agents Touching This Field", "pie",
+        {"type": "pie", "addTooltip": True, "addLegend": True, "legendPosition": "right", "isDonut": True,
+         "labels": {"show": True, "values": True, "last_level": True, "truncate": 100}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "client_user_agent", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Query templates referencing this field
+    objects.append(_vis(
+        "vis-drilldown-templates", "Query Templates Referencing This Field", "table",
+        {**TABLE_PARAMS, "percentageCol": "Count"},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "avg",
+             "params": {"field": "response_time_ms"}, "schema": "metric"},
+            {"id": "3", "enabled": True, "type": "sum",
+             "params": {"field": "response_time_ms", "customLabel": "Total Response Time"},
+             "schema": "metric"},
+            {"id": "4", "enabled": True, "type": "terms",
+             "params": {"field": "query_template_hash", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Response time over time
+    objects.append(_vis(
+        "vis-drilldown-response-time", "Response Time Over Time", "line",
+        {"type": "line", "grid": {"categoryLines": False}, **LINE_AXES,
+         "seriesParams": [{"show": True, "type": "line", "mode": "normal", "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Avg response_time_ms", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2,
+                           "showCircles": True, "interpolate": "linear"}],
+         "addTooltip": True, "addLegend": False,
+         "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "avg",
+             "params": {"field": "response_time_ms"}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "date_histogram",
+             "params": {"field": "timestamp", "useNormalizedEsInterval": True,
+                        "scaleMetricValues": False, "interval": "auto",
+                        "drop_partials": False, "min_doc_count": 1,
+                        "extended_bounds": {}},
+             "schema": "segment"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # =========================================================
     # DASHBOARDS
     # =========================================================
 
@@ -1018,6 +1319,183 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "references": comparison_refs,
     })
 
+    # Mapping Diff dashboard
+    diff_control_input, diff_control_refs = _control_group_input(diff_dv_id)
+    diff_panels = [
+        panel_ref(0, "md-header-diff-overview",  0,  0, 48,  5),
+        panel_ref(1, "vis-diff-classification",   0,  5, 16, 14),
+        panel_ref(2, "vis-diff-by-group",        16,  5, 32, 14),
+        panel_ref(3, "vis-diff-fields-table",     0, 19, 48, 20),
+        panel_ref(4, "vis-diff-unused",           0, 39, 36, 16),
+        panel_ref(5, "vis-diff-types",           36, 39, 12, 16),
+    ]
+    diff_refs = [
+        {"name": "panel_0", "type": "visualization", "id": "md-header-diff-overview"},
+        {"name": "panel_1", "type": "visualization", "id": "vis-diff-classification"},
+        {"name": "panel_2", "type": "visualization", "id": "vis-diff-by-group"},
+        {"name": "panel_3", "type": "visualization", "id": "vis-diff-fields-table"},
+        {"name": "panel_4", "type": "visualization", "id": "vis-diff-unused"},
+        {"name": "panel_5", "type": "visualization", "id": "vis-diff-types"},
+    ] + diff_control_refs
+    objects.append({
+        "id": "mapping-diff",
+        "type": "dashboard",
+        "attributes": {
+            "title": "Mapping Diff — Field Usage vs. Mapping",
+            "controlGroupInput": diff_control_input,
+            "panelsJSON": json.dumps(diff_panels),
+            "optionsJSON": json.dumps({
+                "useMargins": True, "syncColors": True, "syncCursor": True,
+                "syncTooltips": False, "hidePanelTitles": False,
+            }),
+            "timeRestore": True,
+            "timeTo": "now",
+            "timeFrom": "now-24h",
+            "kibanaSavedObjectMeta": {
+                "searchSourceJSON": json.dumps({
+                    "query": {"query": "", "language": "kuery"}, "filter": [],
+                })
+            },
+        },
+        "references": diff_refs,
+    })
+
+    # Field Drill-Down dashboard (per-field investigation from .usage-events)
+    # Controls: index_group + field category dropdowns (queried, filtered, aggregated).
+    # User picks a field in ONE category dropdown; all panels filter to matching events.
+    # chainingSystem=NONE so controls don't cascade-filter each other's options.
+    drilldown_control_panels = {
+        "0": {
+            "type": "optionsListControl",
+            "order": 0,
+            "width": "medium",
+            "grow": True,
+            "explicitInput": {
+                "id": "0",
+                "fieldName": "index_group",
+                "title": "Index Group",
+                "selectedOptions": [],
+                "enhancements": {},
+                "singleSelect": False,
+                "searchTechnique": "prefix",
+            },
+        },
+        "1": {
+            "type": "optionsListControl",
+            "order": 1,
+            "width": "medium",
+            "grow": True,
+            "explicitInput": {
+                "id": "1",
+                "fieldName": "fields.queried",
+                "title": "Queried Field",
+                "selectedOptions": [],
+                "enhancements": {},
+                "singleSelect": True,
+                "searchTechnique": "prefix",
+            },
+        },
+        "2": {
+            "type": "optionsListControl",
+            "order": 2,
+            "width": "medium",
+            "grow": True,
+            "explicitInput": {
+                "id": "2",
+                "fieldName": "fields.filtered",
+                "title": "Filtered Field",
+                "selectedOptions": [],
+                "enhancements": {},
+                "singleSelect": True,
+                "searchTechnique": "prefix",
+            },
+        },
+        "3": {
+            "type": "optionsListControl",
+            "order": 3,
+            "width": "medium",
+            "grow": True,
+            "explicitInput": {
+                "id": "3",
+                "fieldName": "fields.aggregated",
+                "title": "Aggregated Field",
+                "selectedOptions": [],
+                "enhancements": {},
+                "singleSelect": True,
+                "searchTechnique": "prefix",
+            },
+        },
+    }
+    drilldown_control_input = {
+        "chainingSystem": "NONE",
+        "controlStyle": "oneLine",
+        "showApplySelections": False,
+        "ignoreParentSettingsJSON": json.dumps({
+            "ignoreFilters": False,
+            "ignoreQuery": False,
+            "ignoreTimerange": False,
+            "ignoreValidations": False,
+        }),
+        "panelsJSON": json.dumps(drilldown_control_panels),
+    }
+    drilldown_control_refs = [
+        {"name": "controlGroup_0:optionsListDataView", "type": "index-pattern", "id": usage_dv_id},
+        {"name": "controlGroup_1:optionsListDataView", "type": "index-pattern", "id": usage_dv_id},
+        {"name": "controlGroup_2:optionsListDataView", "type": "index-pattern", "id": usage_dv_id},
+        {"name": "controlGroup_3:optionsListDataView", "type": "index-pattern", "id": usage_dv_id},
+    ]
+
+    drilldown_panels = [
+        panel_ref(0,  "md-header-field-drilldown",  0,  0, 48,  8),
+        panel_ref(1,  "vis-drilldown-usage-time",    0,  8, 32, 14),
+        panel_ref(2,  "vis-drilldown-operations",   32,  8, 16, 14),
+        panel_ref(3,  "vis-drilldown-clients",       0, 22, 16, 14),
+        panel_ref(4,  "vis-drilldown-client-ips",   16, 22, 16, 14),
+        panel_ref(5,  "vis-drilldown-user-agents",  32, 22, 16, 14),
+        panel_ref(6,  "vis-drilldown-templates",     0, 36, 24, 14),
+        panel_ref(7,  "vis-drilldown-response-time",24, 36, 24, 14),
+        {
+            "panelIndex": "8",
+            "gridData": {"x": 0, "y": 50, "w": 48, "h": 18, "i": "8"},
+            "version": "8.12.2",
+            "type": "search",
+            "panelRefName": "panel_8",
+        },
+    ]
+    drilldown_refs = [
+        {"name": "panel_0", "type": "visualization", "id": "md-header-field-drilldown"},
+        {"name": "panel_1", "type": "visualization", "id": "vis-drilldown-usage-time"},
+        {"name": "panel_2", "type": "visualization", "id": "vis-drilldown-operations"},
+        {"name": "panel_3", "type": "visualization", "id": "vis-drilldown-clients"},
+        {"name": "panel_4", "type": "visualization", "id": "vis-drilldown-client-ips"},
+        {"name": "panel_5", "type": "visualization", "id": "vis-drilldown-user-agents"},
+        {"name": "panel_6", "type": "visualization", "id": "vis-drilldown-templates"},
+        {"name": "panel_7", "type": "visualization", "id": "vis-drilldown-response-time"},
+        {"name": "panel_8", "type": "search", "id": "search-usage-events"},
+    ] + drilldown_control_refs
+    objects.append({
+        "id": "field-drilldown",
+        "type": "dashboard",
+        "attributes": {
+            "title": "Field Drill-Down — Who Uses This Field?",
+            "controlGroupInput": drilldown_control_input,
+            "panelsJSON": json.dumps(drilldown_panels),
+            "optionsJSON": json.dumps({
+                "useMargins": True, "syncColors": True, "syncCursor": True,
+                "syncTooltips": False, "hidePanelTitles": False,
+            }),
+            "timeRestore": True,
+            "timeTo": "now",
+            "timeFrom": "now-7d",
+            "kibanaSavedObjectMeta": {
+                "searchSourceJSON": json.dumps({
+                    "query": {"query": "", "language": "kuery"}, "filter": [],
+                })
+            },
+        },
+        "references": drilldown_refs,
+    })
+
     return objects
 
 
@@ -1044,6 +1522,32 @@ def import_objects(base_url: str, objects: list[dict]) -> None:
         print(f"  WARNING: Import failed: {resp.status_code} {resp.text[:300]}")
 
 
+def ensure_mapping_diff_index(es_url: str) -> None:
+    """Create the .mapping-diff index in ES if it doesn't exist.
+
+    Needed so the Kibana data view can discover the field schema
+    even before the gateway's diff loop has run.
+    """
+    from gateway.mapping_diff import MAPPING_DIFF_INDEX, MAPPING_DIFF_INDEX_MAPPING
+
+    try:
+        resp = requests.head(f"{es_url}/{MAPPING_DIFF_INDEX}")
+        if resp.status_code == 200:
+            print(f"  .mapping-diff index already exists")
+            return
+        resp = requests.put(
+            f"{es_url}/{MAPPING_DIFF_INDEX}",
+            json=MAPPING_DIFF_INDEX_MAPPING,
+            headers={"Content-Type": "application/json"},
+        )
+        if resp.status_code in (200, 201):
+            print(f"  Created .mapping-diff index")
+        else:
+            print(f"  WARNING: Failed to create .mapping-diff index: {resp.status_code} {resp.text[:200]}")
+    except requests.RequestException as exc:
+        print(f"  WARNING: Could not ensure .mapping-diff index: {exc}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Setup Kibana dashboards")
     parser.add_argument("--kibana", default=KIBANA_URL, help="Kibana URL")
@@ -1055,22 +1559,30 @@ def main():
     if not args.no_wait:
         wait_for_kibana(base)
 
+    # --- Ensure ES indices exist for data views ---
+    from config import ES_HOST
+    print("\nEnsuring ES indices...")
+    ensure_mapping_diff_index(ES_HOST)
+
     # --- Data Views (with fixed IDs so visualizations can reference them) ---
     print("\nCreating data views...")
     products_dv_id = create_data_view(base, "products", "Products", "dv-products")
     usage_dv_id = create_data_view(base, ".usage-events", "Usage Events", "dv-usage-events", time_field="timestamp")
     logs_dv_id = create_data_view(base, "logs*", "Logs", "dv-logs", time_field="timestamp")
     orders_dv_id = create_data_view(base, "orders*", "Orders", "dv-orders", time_field="order_date")
+    diff_dv_id = create_data_view(base, ".mapping-diff", "Mapping Diff", "dv-mapping-diff", time_field="timestamp")
 
     # --- Build and import all visualizations + dashboards ---
     print("\nImporting visualizations and dashboards...")
-    objects = build_saved_objects(products_dv_id, usage_dv_id, logs_dv_id, orders_dv_id)
+    objects = build_saved_objects(products_dv_id, usage_dv_id, logs_dv_id, orders_dv_id, diff_dv_id)
     import_objects(base, objects)
 
     print(f"\nDone! Open Kibana at {base}")
     print(f"  Products:        {base}/app/dashboards#/view/products-explorer")
     print(f"  Usage/Heat:      {base}/app/dashboards#/view/usage-heat")
     print(f"  Multi-Index:     {base}/app/dashboards#/view/multi-index-comparison")
+    print(f"  Mapping Diff:    {base}/app/dashboards#/view/mapping-diff")
+    print(f"  Field Drill-Down:{base}/app/dashboards#/view/field-drilldown")
     print(f"  Discover:        {base}/app/discover")
 
 

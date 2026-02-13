@@ -55,6 +55,14 @@ Field-level heat and recommendations are delivered directly in Kibana dashboard 
 - **Query Patterns**: Costly templates, query inefficiency signals
 - **Lookback Analysis**: ILM tiering based on actual query windows
 
+### Field Drill-Down (Kibana Dashboard)
+
+A dedicated dashboard for investigating a specific field's usage. Users come here from the Mapping Diff dashboard after spotting an unused or sourced-only field and want to verify whether it's safe to remove.
+
+- **Controls**: Index Group + field category dropdowns (Queried, Filtered, Aggregated). Pick a field in one dropdown; all panels filter to matching events.
+- **Panels**: Usage over time, operations breakdown, clients table, client IPs, user-agents, query templates, response time trend, raw events.
+- **Cross-category search**: For fields that appear in sorted/sourced/written categories, use the KQL bar with `fields.queried: "field" OR fields.filtered: "field" OR ...`.
+
 ## Component Details
 
 ### gateway/proxy.py — Reverse Proxy
@@ -113,6 +121,16 @@ Periodically fetches alias and data stream mappings from ES and maintains an in-
 - **Data stream priority**: If an index belongs to both an alias and a data stream, the data stream wins.
 - **Atomic swap**: Lookup dicts are swapped via Python reference assignment (safe under asyncio's single-threaded model).
 
+### gateway/mapping_diff.py — Mapping Diff Engine
+
+Compares index mappings against actual field usage observed through the gateway. Runs as a background loop (like metadata refresh) and writes results to the `.mapping-diff` index for Kibana visualization.
+
+- **Mapping flattener**: Walks nested ES mapping properties via `GET /{index}/_mapping`, handles multi-fields (`title.keyword`), nested objects (`metadata.created_at`), and extracts `index`/`doc_values` metadata per field.
+- **Usage aggregation**: Queries `.usage-events` with terms aggregations on all 6 field categories (`fields.queried`, `fields.filtered`, etc.) with `max(timestamp)` sub-aggs for last_seen tracking.
+- **Classification**: Each field is classified as `active` (queried/filtered/aggregated/sorted), `sourced_only` (only fetched in _source), `write_only` (only written, never read), or `unused` (zero references).
+- **Write strategy**: Delete-and-rewrite per index group. The `.mapping-diff` index stays small (one doc per field per group) so full rewrite is fast and avoids stale data.
+- **Refresh loop**: Runs every `MAPPING_DIFF_REFRESH_INTERVAL` seconds (default 300). Processes all known index groups from the metadata cache.
+
 ### gateway/ui.py — Control Panel
 
 Single-page HTML/JS control panel served at `/_gateway/ui`. Provides:
@@ -131,7 +149,7 @@ Exposed via `/_gateway/stats` and included in `/_gateway/health` responses.
 ### gateway/main.py — Application Entry Point
 
 FastAPI application that wires everything together:
-- Lifespan hook: creates usage index, starts metadata refresh, starts bulk writer, shuts down all httpx clients.
+- Lifespan hook: creates usage index, starts metadata refresh, starts bulk writer, starts mapping diff loop, shuts down all httpx clients.
 - Gateway endpoints (`/_gateway/*`): health, stats, groups, sample-events, config, generate, UI.
 - Catch-all proxy route: observation pipeline for all other traffic with metrics instrumentation.
 - Shared httpx client (`_gw_client`) for gateway endpoints that query ES, avoiding per-request client creation.
@@ -158,6 +176,8 @@ All settings are read from environment variables with defaults for local develop
 | `PROXY_BODY_LIMIT` | `1048576` | Max body size (bytes) for buffered proxy; larger bodies are streamed without extraction |
 | `EVENT_TIMEOUT` | `10` | Event emission timeout (seconds) |
 | `METADATA_REFRESH_INTERVAL` | `60` | Metadata cache refresh (seconds) |
+| `MAPPING_DIFF_REFRESH_INTERVAL` | `300` | Mapping diff refresh interval (seconds) |
+| `MAPPING_DIFF_LOOKBACK_HOURS` | `168` | How far back to query usage events for mapping diff (hours, default 7 days) |
 | `GATEWAY_WORKERS` | `1` | Number of Uvicorn worker processes (set to CPU count for production) |
 | `BULK_FLUSH_SIZE` | `100` | Max events per bulk write batch |
 | `BULK_FLUSH_INTERVAL` | `0.5` | Max seconds between bulk flushes |
@@ -201,6 +221,36 @@ The `.usage-events` index stores one document per observed operation:
 }
 ```
 
+## Mapping Diff Schema
+
+The `.mapping-diff` index stores one document per field per index group (latest snapshot only, refreshed every `MAPPING_DIFF_REFRESH_INTERVAL` seconds):
+
+```json
+{
+  "timestamp": "2026-02-13T12:00:00Z",
+  "index_group": "products",
+  "field_name": "legacy_supplier_code",
+  "mapped_type": "keyword",
+  "is_indexed": true,
+  "has_doc_values": true,
+  "total_references": 0,
+  "last_seen": null,
+  "last_seen_queried": null,
+  "last_seen_filtered": null,
+  "last_seen_aggregated": null,
+  "last_seen_sorted": null,
+  "last_seen_sourced": null,
+  "last_seen_written": null,
+  "count_queried": 0,
+  "count_filtered": 0,
+  "count_aggregated": 0,
+  "count_sorted": 0,
+  "count_sourced": 0,
+  "count_written": 0,
+  "classification": "unused"
+}
+```
+
 ## Failure Modes
 
 | Scenario | Behavior |
@@ -210,6 +260,7 @@ The `.usage-events` index stores one document per observed operation:
 | Metadata refresh fails | Logged. Stale cache used until next successful refresh. |
 | Extractor can't parse body | Returns empty FieldRefs. Event still emitted with no field data. |
 | Usage index doesn't exist | Created automatically on gateway startup. |
+| Mapping diff refresh fails | Logged. Stale `.mapping-diff` data remains until next successful refresh. |
 
 ## Safety Invariants
 
@@ -231,6 +282,7 @@ elastic_recommand/
     extractor.py         # DSL field extraction
     events.py            # Usage event model and emission
     metadata.py          # Index metadata cache (alias/data stream)
+    mapping_diff.py      # Mapping vs. usage comparison engine
     metrics.py           # In-memory counters for monitoring
     ui.py                # Control panel HTML/JS
   generator/
@@ -241,6 +293,7 @@ elastic_recommand/
   tests/
     test_events.py       # Fingerprinting and event building tests
     test_extractor.py    # Path parsing, DSL extraction, bulk, msearch
+    test_mapping_diff.py # Mapping diff flattening, classification, and diff tests
     test_metadata.py     # Group resolution tests
     test_metrics.py      # In-memory counter tests
     test_queries.py      # Query template and lookback tests
@@ -285,7 +338,7 @@ For the full tech stack evaluation (Kong, Go rewrite, and why we hardened Python
 - **Structured logging**: JSON-formatted logs for log aggregation systems.
 - **Metrics endpoint**: Prometheus/OpenTelemetry metrics for gateway health monitoring.
 - **Retention policy**: Auto-delete old usage events (ILM on `.usage-events`).
-- **Field mapping integration**: Cross-reference heat data with actual index mappings to generate specific optimization commands.
+- **Mapping recommendations**: Rule-based engine that turns mapping diff classifications into specific actionable changes (set `index: false`, remove multi-field, etc.).
 - **Multi-cluster support**: Proxy and observe traffic across multiple ES clusters.
 - **Authentication passthrough**: Forward auth headers and track per-user usage patterns.
 - **Alerting**: Notify when indices transition between tiers or when unused fields are detected.
