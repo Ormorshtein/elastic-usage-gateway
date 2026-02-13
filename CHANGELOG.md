@@ -4,6 +4,30 @@ Reverse-chronological record of significant changes, decisions, and lessons lear
 
 ---
 
+## 2026-02-13 — Remove Analysis Endpoints, Deliver Insights via Kibana Dashboards
+
+Removed both `GET /_gateway/heat` and `GET /_gateway/query-patterns` JSON endpoints. All analysis is now delivered through **Kibana dashboards** with inline guidance text in Markdown panels. Deleted `gateway/analyzer.py` entirely.
+
+**What changed:**
+- Removed `/_gateway/heat` endpoint, `compute_heat()`, and all supporting functions
+- Removed `/_gateway/query-patterns` endpoint and `compute_query_patterns()`
+- Deleted `gateway/analyzer.py` and `tests/test_analyzer.py`
+- Removed `ANALYZER_TIMEOUT` and heat threshold config vars (`INDEX_HEAT_HOT/WARM/COLD`, `FIELD_HEAT_HOT/WARM/COLD`)
+- Enriched all 6 Kibana dashboard Markdown section headers with actionable "How to act on this" guidance:
+  - Overview: traffic tier interpretation, index group prioritization
+  - Field Heat by Count: unused fields → `index: false`, source-only fields, aggregation/doc_values tips
+  - Field Heat by Response Time: optimization priority based on count vs time ranking
+  - Query Patterns: costly templates, unique-template-count signals, filtering by template hash
+  - Lookback Analysis: ILM policy decisions from actual query windows
+  - Raw Events: filtering tips for debugging
+- Updated project goal (CLAUDE.md) to include hot query recommendations
+
+**Why:** Both endpoints duplicated what Kibana already does natively (aggregations against `.usage-events`). The only unique value was recommendation text, which is more useful baked into the dashboard where users see it, not behind JSON endpoints nobody visits. Removing `analyzer.py` simplifies the codebase — one less module for the team to maintain.
+
+**Files changed:** `gateway/analyzer.py` (deleted), `tests/test_analyzer.py` (deleted), `gateway/main.py`, `gateway/ui.html`, `kibana_setup.py`, `config.py`, `CLAUDE.md`, `ARCHITECTURE.md`, `README.md`
+
+---
+
 ## 2026-02-13 — Deliverable 3: Query Template Clustering
 
 Added structural query pattern analysis. Instead of treating every unique query body as distinct, the gateway now extracts a **template** by replacing all leaf values with `"?"` and hashing the skeleton. Structurally identical queries (e.g., same bool/range/term shape with different values) collapse into one template. This reveals which query *shapes* dominate traffic and cost.

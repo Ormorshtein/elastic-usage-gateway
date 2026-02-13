@@ -201,7 +201,6 @@ After generating traffic, view the results:
 
 ![Kibana dashboard — sorted/fetched fields, lookback windows, raw events](docs/dashboard2.jpg)
 
-- **Heat report API**: `curl http://localhost:9301/_gateway/heat | python -m json.tool`
 - **Gateway monitor**: Switch to the **Monitor** tab in the UI to see live stats, grouped by proxy, events, performance, and system.
 
 ![Monitor — grouped metrics with reset button](docs/monitor.jpg)
@@ -216,7 +215,6 @@ All settings via environment variables (see `config.py`). Full configuration ref
 |----------|-------------|
 | `GET /_gateway/health` | Health check with ES connectivity probe |
 | `GET /_gateway/stats` | Internal counters and metadata cache info |
-| `GET /_gateway/heat?hours=24` | Heat report for the last N hours |
 | `GET /_gateway/groups` | Index groups with concrete indices |
 | `GET /_gateway/sample-events` | Recent usage events for debugging |
 | `GET/PATCH /_gateway/config` | Event sampling and query body storage config |

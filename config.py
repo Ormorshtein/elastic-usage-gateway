@@ -12,10 +12,7 @@ Environment variables:
   CLUSTER_ID               Cluster identifier in events (default: default)
   PROXY_TIMEOUT            Proxy request timeout in seconds (default: 120)
   EVENT_TIMEOUT            Event emission timeout in seconds (default: 10)
-  ANALYZER_TIMEOUT         Heat analysis timeout in seconds (default: 30)
   METADATA_REFRESH_INTERVAL  Metadata cache refresh interval (default: 60)
-  INDEX_HEAT_HOT/WARM/COLD Heat tier thresholds in ops/hour
-  FIELD_HEAT_HOT/WARM/COLD Field heat thresholds as proportions
   EVENT_SAMPLE_RATE        Fraction of requests that emit events (default: 1.0)
   QUERY_BODY_ENABLED       Store query bodies in events (default: true)
   QUERY_BODY_SAMPLE_RATE   Fraction of events to store bodies (default: 1.0)
@@ -37,18 +34,7 @@ CLUSTER_ID = os.getenv("CLUSTER_ID", "default")
 # --- Timeouts (seconds) ---
 PROXY_TIMEOUT = float(os.getenv("PROXY_TIMEOUT", "120"))
 EVENT_TIMEOUT = float(os.getenv("EVENT_TIMEOUT", "10"))
-ANALYZER_TIMEOUT = float(os.getenv("ANALYZER_TIMEOUT", "30"))
 METADATA_REFRESH_INTERVAL = int(os.getenv("METADATA_REFRESH_INTERVAL", "60"))
-
-# --- Heat Thresholds (ops per hour) ---
-INDEX_HEAT_HOT = float(os.getenv("INDEX_HEAT_HOT", "100"))
-INDEX_HEAT_WARM = float(os.getenv("INDEX_HEAT_WARM", "10"))
-INDEX_HEAT_COLD = float(os.getenv("INDEX_HEAT_COLD", "1"))
-
-# --- Field Heat Thresholds (proportion of total field refs) ---
-FIELD_HEAT_HOT = float(os.getenv("FIELD_HEAT_HOT", "0.15"))
-FIELD_HEAT_WARM = float(os.getenv("FIELD_HEAT_WARM", "0.05"))
-FIELD_HEAT_COLD = float(os.getenv("FIELD_HEAT_COLD", "0.01"))
 
 # --- Proxy ---
 PROXY_BODY_LIMIT = int(os.getenv("PROXY_BODY_LIMIT", str(1024 * 1024)))  # 1MB

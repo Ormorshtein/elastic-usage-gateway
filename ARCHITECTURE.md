@@ -2,14 +2,14 @@
 
 ## Project Purpose
 
-The ES Usage Gateway is a transparent reverse proxy for Elasticsearch that observes query and indexing traffic to compute **index-level** and **field-level heat scores**. It answers:
+The ES Usage Gateway is a transparent reverse proxy for Elasticsearch that observes query and indexing traffic to measure **field-level usage** and **query pattern cost**. It answers:
 
-- Which indices are hot, warm, cold, or frozen?
 - Which fields are actively queried, filtered, aggregated, sorted, or written?
 - Which fields are never used and can be safely de-indexed to save resources?
+- Which query shapes consume the most cluster time?
 - How far back in time do queries typically look (lookback window)?
 
-This enables data-driven decisions about ILM (Index Lifecycle Management), mapping optimization, and capacity planning.
+This enables data-driven decisions about ILM (Index Lifecycle Management), mapping optimization, capacity planning, and query performance tuning. Insights are delivered through Kibana dashboards with built-in guidance text explaining how to act on each section.
 
 ## System Architecture
 
@@ -27,9 +27,6 @@ This enables data-driven decisions about ILM (Index Lifecycle Management), mappi
                           │       │                             │
                           │       ▼                             │
                           │  .usage-events index ◄──────────────│
-                          │       │                             │
-                          │       ▼                             │
-                          │  Analyzer (compute heat on demand)  │
                           │                                     │
                           │  Metadata (alias/data stream cache) │
                           │                                     │
@@ -49,13 +46,14 @@ This enables data-driven decisions about ILM (Index Lifecycle Management), mappi
 6. **Emit**: Build a usage event document and emit it as a fire-and-forget background task.
 7. **Return**: Send the ES response to the client unchanged.
 
-### Heat Analysis (GET /_gateway/heat)
+### Heat & Recommendations (Kibana Dashboards)
 
-1. Query `.usage-events` with time window filter and nested aggregations.
-2. Group by `index_group`, then by concrete `index`, then by field category.
-3. Compute `ops_per_hour` for index heat, `field_refs / total_refs` for field heat.
-4. Classify into tiers (hot/warm/cold/frozen for indices, hot/warm/cold/unused for fields).
-5. Generate actionable recommendations per index and field.
+Field-level heat and recommendations are delivered directly in Kibana dashboard panels via guidance text in Markdown headers (see `kibana_setup.py`). Each dashboard section includes actionable advice:
+- **Overview**: Traffic tiers, index group prioritization
+- **Field Heat by Count**: Unused fields, source-only fields, aggregation optimization
+- **Field Heat by Response Time**: Slow-query fields, optimization priority
+- **Query Patterns**: Costly templates, query inefficiency signals
+- **Lookback Analysis**: ILM tiering based on actual query windows
 
 ## Component Details
 
@@ -107,18 +105,6 @@ Features:
 - **Query body storage**: Optional, with configurable sampling rate (runtime-adjustable).
 - **Dedicated httpx client**: Separate from the proxy client to avoid contention.
 
-### gateway/analyzer.py — Heat Analysis
-
-Reads usage events and computes heat reports with two field scoring perspectives:
-- **Index heat**: `total_operations / time_window_hours` → hot/warm/cold/frozen tier.
-- **Field heat (count-based)**: `field_references / total_field_references` (proportion) → hot/warm/cold/unused tier. Shows which fields are queried most often.
-- **Field heat (time-weighted)**: `sum(response_time_ms) / total_response_time_ms` (proportion) → same tier thresholds. Fields involved in slow queries rank higher — optimizing these saves the most cluster time.
-- **Query patterns**: Groups events by `query_template_hash` (structural template) and reports execution count, total/avg response time, and sample template text per pattern.
-- **Lookback stats**: avg, max, p50 lookback windows per index group.
-- **Recommendations**: Both scoring methods generate independent recommendations.
-
-Thresholds are configurable via environment variables.
-
 ### gateway/metadata.py — Index Metadata Cache
 
 Periodically fetches alias and data stream mappings from ES and maintains an in-memory lookup. Maps concrete index names to their logical group (alias or data stream name).
@@ -146,7 +132,7 @@ Exposed via `/_gateway/stats` and included in `/_gateway/health` responses.
 
 FastAPI application that wires everything together:
 - Lifespan hook: creates usage index, starts metadata refresh, starts bulk writer, shuts down all httpx clients.
-- Gateway endpoints (`/_gateway/*`): health, stats, heat, query-patterns, groups, sample-events, config, generate, UI.
+- Gateway endpoints (`/_gateway/*`): health, stats, groups, sample-events, config, generate, UI.
 - Catch-all proxy route: observation pipeline for all other traffic with metrics instrumentation.
 - Shared httpx client (`_gw_client`) for gateway endpoints that query ES, avoiding per-request client creation.
 - Supports `GATEWAY_WORKERS` for multi-process parallelism via Uvicorn's `--workers` flag.
@@ -171,18 +157,11 @@ All settings are read from environment variables with defaults for local develop
 | `PROXY_TIMEOUT` | `120` | Proxy request timeout (seconds) |
 | `PROXY_BODY_LIMIT` | `1048576` | Max body size (bytes) for buffered proxy; larger bodies are streamed without extraction |
 | `EVENT_TIMEOUT` | `10` | Event emission timeout (seconds) |
-| `ANALYZER_TIMEOUT` | `30` | Heat analysis query timeout (seconds) |
 | `METADATA_REFRESH_INTERVAL` | `60` | Metadata cache refresh (seconds) |
 | `GATEWAY_WORKERS` | `1` | Number of Uvicorn worker processes (set to CPU count for production) |
 | `BULK_FLUSH_SIZE` | `100` | Max events per bulk write batch |
 | `BULK_FLUSH_INTERVAL` | `0.5` | Max seconds between bulk flushes |
 | `BULK_QUEUE_SIZE` | `5000` | Bounded event queue size (events dropped when full) |
-| `INDEX_HEAT_HOT` | `100` | Hot tier threshold (ops/hour) |
-| `INDEX_HEAT_WARM` | `10` | Warm tier threshold (ops/hour) |
-| `INDEX_HEAT_COLD` | `1` | Cold tier threshold (ops/hour) |
-| `FIELD_HEAT_HOT` | `0.15` | Hot field threshold (proportion) |
-| `FIELD_HEAT_WARM` | `0.05` | Warm field threshold (proportion) |
-| `FIELD_HEAT_COLD` | `0.01` | Cold field threshold (proportion) |
 | `EVENT_SAMPLE_RATE` | `1.0` | Fraction of requests that emit events |
 | `QUERY_BODY_ENABLED` | `true` | Store query bodies in events |
 | `QUERY_BODY_SAMPLE_RATE` | `1.0` | Fraction of events to store bodies |
@@ -230,7 +209,6 @@ The `.usage-events` index stores one document per observed operation:
 | Event emission fails | Logged as warning. Request already returned to client. |
 | Metadata refresh fails | Logged. Stale cache used until next successful refresh. |
 | Extractor can't parse body | Returns empty FieldRefs. Event still emitted with no field data. |
-| Heat query fails | Returns error JSON with status code. |
 | Usage index doesn't exist | Created automatically on gateway startup. |
 
 ## Safety Invariants
@@ -252,7 +230,6 @@ elastic_recommand/
     proxy.py             # Reverse proxy (httpx)
     extractor.py         # DSL field extraction
     events.py            # Usage event model and emission
-    analyzer.py          # Heat computation
     metadata.py          # Index metadata cache (alias/data stream)
     metrics.py           # In-memory counters for monitoring
     ui.py                # Control panel HTML/JS
@@ -262,7 +239,6 @@ elastic_recommand/
     queries.py           # Scenario-based query templates
     seed.py              # Sample data seeder
   tests/
-    test_analyzer.py     # Heat tier and recommendation tests
     test_events.py       # Fingerprinting and event building tests
     test_extractor.py    # Path parsing, DSL extraction, bulk, msearch
     test_metadata.py     # Group resolution tests

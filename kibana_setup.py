@@ -341,29 +341,61 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
 
     objects.append(_markdown(
         "md-header-overview", "Section: Overview",
-        "## Overview\nTraffic volume, index groups, and query type breakdown.",
+        "## Overview\n"
+        "Traffic volume, index groups, and query type breakdown.\n\n"
+        "**Reading this section:**\n"
+        "- **High-traffic index groups** (thousands of ops/hour) need adequate replicas and heap — check these first.\n"
+        "- **Very low-traffic groups** (< 1 op/hour) are candidates for freezing or reducing replicas to save resources.\n"
+        "- Use the *Index Group* filter at the top to drill into a specific group.",
     ))
     objects.append(_markdown(
         "md-header-field-heat-count", "Section: Field Heat by Count",
-        "## Field Heat by Count\nWhich fields are used most often, by operation type.",
+        "## Field Heat by Count\n"
+        "Which fields are referenced most often, broken down by operation type (queried, filtered, aggregated, sorted, fetched).\n\n"
+        "**How to act on this:**\n"
+        "- **Fields that never appear** in any table are unused — set `index: false` in the mapping to save disk and indexing CPU.\n"
+        "- **Fields only in \"Fetched\"** (returned in `_source` but never queried/filtered/aggregated) — also candidates for `index: false`.\n"
+        "- **Fields in \"Aggregated\" or \"Sorted\"** — ensure `doc_values: true` and use `keyword` or numeric types for best performance.\n"
+        "- **Fields in \"Filtered\" with high cardinality** — consider whether a `keyword` type with `eager_global_ordinals` would help.",
     ))
     objects.append(_markdown(
         "md-header-field-heat-time", "Section: Field Heat by Response Time",
-        "## Field Heat by Response Time\nWhich fields cause the most total latency. Optimizing these saves the most cluster time.",
+        "## Field Heat by Response Time\n"
+        "Same fields as above, but ranked by **total response time** instead of count. "
+        "A field involved in 10 slow queries ranks higher than one in 1,000 fast queries.\n\n"
+        "**How to act on this:**\n"
+        "- Fields at the top of these tables are where optimization effort pays off most.\n"
+        "- Compare with the count-based tables above: if a field is high here but low by count, it's involved in a few very expensive queries — investigate those query patterns.\n"
+        "- If a field is high in both, it's both frequent and slow — highest priority for optimization (better mapping type, adding `doc_values`, or restructuring queries).",
     ))
     objects.append(_markdown(
         "md-header-query-patterns", "Section: Query Patterns",
-        "## Query Patterns\nStructural query templates grouped by shape (leaf values replaced with `?`). "
-        "Shows which query patterns dominate traffic and cost. "
-        "Use the `/_gateway/query-patterns` API for full template text.",
+        "## Query Patterns\n"
+        "Structural query templates grouped by shape (leaf values replaced with `?`). "
+        "Shows which query patterns dominate traffic and cluster time.\n\n"
+        "**How to act on this:**\n"
+        "- **Costliest templates** (high total response time) are your best optimization targets — rewrite the query, add caching, or adjust shard routing.\n"
+        "- **High-count templates with low avg response time** are fine — volume alone isn't a problem if queries are fast.\n"
+        "- **Many unique templates per index group** may indicate dynamic query generation — check if the application is building queries inefficiently.\n"
+        "- Use the raw events table (bottom of dashboard) filtered by `query_template_hash` to see actual query bodies for a pattern.",
     ))
     objects.append(_markdown(
         "md-header-lookback", "Section: Lookback Analysis",
-        "## Lookback Analysis\nHow far back queries look in time — useful for ILM tiering decisions.",
+        "## Lookback Analysis\n"
+        "How far back queries look in time (`now-Xh` ranges) — directly informs ILM tiering decisions.\n\n"
+        "**How to act on this:**\n"
+        "- If 95% of queries look back ≤ 24h, data older than 24h can move to warm/cold tiers.\n"
+        "- If the max lookback is 7d but you're keeping 90d of hot data, you're over-provisioning.\n"
+        "- **Avg lookback by group** shows which index groups need the deepest hot retention — set ILM policies per group accordingly.\n"
+        "- **Lookback date fields** shows which timestamp fields are used for filtering — ensure these are optimized (`date` type, `doc_values: true`).",
     ))
     objects.append(_markdown(
         "md-header-raw-events", "Section: Raw Events",
-        "## Raw Events\nIndividual query-level event log for debugging and inspection.",
+        "## Raw Events\n"
+        "Individual query-level event log for debugging and inspection.\n\n"
+        "**Tips:** Filter by `query_template_hash` to see all executions of a specific query pattern. "
+        "Filter by `response_time_ms > 1000` to find slow queries. "
+        "Enable *Query Body Storage* in the gateway control panel to see full query text here.",
     ))
 
     # =========================================================

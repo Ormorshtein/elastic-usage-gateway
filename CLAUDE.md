@@ -2,9 +2,9 @@
 
 ## Project Goal
 
-The goal is to measure field-level usage from real Elasticsearch traffic — which fields are queried, filtered, aggregated, sorted, and written — so teams can make data-driven decisions about mapping optimization, ILM tiering, and capacity planning. No tool in the ES ecosystem does this today.
+The goal is to measure field-level usage and query patterns from real Elasticsearch traffic — which fields are queried, filtered, aggregated, sorted, and written, and which query shapes consume the most cluster time — so teams can make data-driven decisions about mapping optimization, ILM tiering, capacity planning, and query performance tuning. No tool in the ES ecosystem does this today.
 
-**Every task should be evaluated through this lens:** Does it help us observe more accurately, analyze more usefully, or deliver clearer recommendations? If a feature doesn't serve field-level usage intelligence, it probably doesn't belong here.
+**Every task should be evaluated through this lens:** Does it help us observe more accurately, analyze more usefully, or deliver clearer recommendations? If a feature doesn't serve field-level usage intelligence or hot query identification, it probably doesn't belong here.
 
 ## Audience
 
