@@ -2,6 +2,22 @@
 
 A reverse-proxy gateway for Elasticsearch that observes query traffic and computes index-level and field-level heat scores. Helps identify hot/warm/cold/unused indices and fields for ILM and mapping optimization.
 
+## Why This Exists
+
+Elasticsearch mappings accumulate fields over time. Teams add fields for new features, migrations, experiments — but rarely remove them. After a year, an index might have 200 mapped fields but only 40 are actively used. The other 160 are still **indexed** (inverted index built on every write), **stored as doc_values** (columnar storage allocated even if never sorted or aggregated), and **replicated** across every shard and replica. This is invisible waste — ES doesn't tell you "field X hasn't been queried in 6 months."
+
+**Why not just ask the team?** Because they don't know. The app has 15 microservices built by 8 teams over 3 years. No one person knows which fields are used by which service. Code search helps but misses dynamic queries, third-party integrations, and Kibana dashboards built by analysts.
+
+**Why a proxy instead of log parsing?** ES slow logs only capture slow queries, not all queries. Application logs require every team to instrument. A proxy captures everything at the infrastructure layer — zero code changes, works for any client (apps, Kibana, curl).
+
+**The payoff:**
+- Set `"index": false` on unused fields → faster indexing, less disk
+- Set `"doc_values": false` on fields that are queried but never sorted/aggregated → less memory
+- Identify cold indices for ILM tiering → move to cheaper storage
+- Validate mapping changes before deploy → "this field is queried 10k times/hour, don't remove it"
+
+In short: **you can't optimize what you don't measure**, and nobody in the ES ecosystem measures field-level usage from real traffic. That's the gap this project fills.
+
 ## Architecture
 
 ```

@@ -1,5 +1,11 @@
 # ES Usage Gateway — Project Guide
 
+## Project Goal
+
+The goal is to measure field-level usage from real Elasticsearch traffic — which fields are queried, filtered, aggregated, sorted, and written — so teams can make data-driven decisions about mapping optimization, ILM tiering, and capacity planning. No tool in the ES ecosystem does this today.
+
+**Every task should be evaluated through this lens:** Does it help us observe more accurately, analyze more usefully, or deliver clearer recommendations? If a feature doesn't serve field-level usage intelligence, it probably doesn't belong here.
+
 ## Audience
 
 This project ships to an on-prem environment and will be maintained by a team of junior engineers. Optimize for readability and simplicity:
