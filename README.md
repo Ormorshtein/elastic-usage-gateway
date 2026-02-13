@@ -192,27 +192,7 @@ After generating traffic, view the results:
 
 ## Configuration
 
-All settings via environment variables (see `config.py`):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ES_HOST` | `http://localhost:9200` | Elasticsearch URL |
-| `GATEWAY_HOST` | `0.0.0.0` | Gateway bind address |
-| `GATEWAY_PORT` | `9301` | Gateway listen port |
-| `USAGE_INDEX` | `.usage-events` | Index for storing usage events |
-| `CLUSTER_ID` | `default` | Cluster identifier |
-| `PROXY_TIMEOUT` | `120` | Proxy request timeout (seconds) |
-| `PROXY_BODY_LIMIT` | `1048576` | Body size threshold for streaming (bytes) |
-| `EVENT_TIMEOUT` | `10` | Event emission timeout (seconds) |
-| `ANALYZER_TIMEOUT` | `30` | Heat analysis query timeout (seconds) |
-| `METADATA_REFRESH_INTERVAL` | `60` | Metadata cache refresh (seconds) |
-| `GATEWAY_WORKERS` | `1` | Uvicorn worker processes (set to CPU count for production) |
-| `BULK_FLUSH_SIZE` | `100` | Max events per bulk write batch |
-| `BULK_FLUSH_INTERVAL` | `0.5` | Max seconds between bulk flushes |
-| `BULK_QUEUE_SIZE` | `5000` | Bounded event queue size (drops when full) |
-| `EVENT_SAMPLE_RATE` | `1.0` | Fraction of requests that emit events (0.0-1.0) |
-| `QUERY_BODY_ENABLED` | `true` | Store query bodies in events |
-| `QUERY_BODY_SAMPLE_RATE` | `1.0` | Fraction of events to store bodies |
+All settings via environment variables (see `config.py`). Full configuration reference in [ARCHITECTURE.md](ARCHITECTURE.md#configuration).
 
 ## API Endpoints
 

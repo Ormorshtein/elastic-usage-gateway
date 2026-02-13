@@ -1,0 +1,148 @@
+# ES Usage Gateway — Changelog
+
+Reverse-chronological record of significant changes, decisions, and lessons learned.
+
+---
+
+## 2026-02-12 — Competitive Research & Feature Roadmap
+
+Added [RESEARCH.md](RESEARCH.md) with comprehensive analysis of the ES ecosystem, competitive landscape, parsing gaps, and prioritized feature roadmap.
+
+**Key findings:**
+- No existing tool (commercial or open-source) does field-level Query DSL parsing for usage intelligence. Closest is ES `_field_usage_stats` (Lucene-level, still Technical Preview).
+- Opster (acquired by Elastic Nov 2023) does cluster-ops monitoring — completely different layer than our field-level analysis.
+- 9 MUST-HAVE parsing gaps identified (~81 lines of code total): `async_search`, `docvalue_fields`, `highlight`, `update_by_query`, `stored_fields`, `suggesters`, `collapse`, composite agg bug, filter agg bug.
+- Key lesson from pganalyze: weight field heat by response time, not just count. `field_importance = total_response_time / sum(all_response_time)`.
+
+---
+
+## 2026-02-09 — Production Scaling Hardening
+
+Hardened the Python/FastAPI stack for production deployment on OpenShift. Six implementation-level fixes, no architecture change.
+
+**Changes:**
+- Bulk event writer (`_bulk` API) replacing single-doc writes — 10-50x more efficient
+- Bounded `asyncio.Queue` with backpressure (drops events when full instead of OOM)
+- Multi-worker support via Uvicorn `--workers` flag
+- Streaming proxy for large request bodies (>1MB streamed without buffering)
+- Shared httpx client for gateway endpoints (eliminated per-request client creation)
+- Dedicated httpx client for event emission (isolated from proxy traffic)
+
+**Tested:** 2000 concurrent queries, 2000 events emitted, 0 failed, 0 dropped.
+
+### Production Scaling Decision Record
+
+#### Context
+
+The gateway is designed for deployment on OpenShift, sitting on the hot path of all Elasticsearch traffic. The question: can the current Python/FastAPI stack handle production scale, or do we need to move to Nginx/Kong/Go?
+
+#### Tech Stack
+
+| Layer | Technology | Role |
+|---|---|---|
+| HTTP server | Uvicorn (ASGI) | Async event loop, connection handling |
+| Framework | FastAPI | Routing, middleware, request/response handling |
+| Proxy client | httpx (AsyncClient) | Connection-pooled forwarding to ES |
+| Event emission | httpx (separate client) | Writing usage events to `.usage-events` |
+| Concurrency | asyncio (single-threaded) | Cooperative multitasking for I/O-bound work |
+| State | Module-level globals | Metrics, metadata cache, sampling config (in-memory, per-process) |
+
+#### Option A: Kong/Nginx in front of Python gateway — REJECTED
+
+**Arguments for:**
+- Kong (OpenResty/Nginx) handles connection management at C speed — 100k+ concurrent connections without breaking a sweat. Python's asyncio tops out at ~10k before event loop scheduling overhead becomes measurable.
+- Kong provides rate limiting, circuit breaking, auth, and TLS termination out of the box.
+- If ES slows down and responses back up, Kong can shed load before it reaches Python.
+- Kong can health-check multiple gateway pods and route around failures.
+
+**Arguments against:**
+- OpenShift already provides this. An OpenShift Route (HAProxy-based) handles TLS termination, load balancing across pods, and connection limits. Adding Kong is a second infrastructure layer to deploy, configure, monitor, and debug.
+- Kong adds 1-3ms latency per request (extra network hop). If ES queries take 10-100ms, that's 1-10% overhead for infrastructure that duplicates OpenShift capabilities.
+- Rate limiting ES traffic is unusual — ES itself has circuit breakers and thread pool queuing. Rate limiting the gateway protects the gateway, not ES.
+- Kong requires its own backing store (Postgres or Cassandra for clustering), its own pods, its own monitoring — significant operational overhead for a single-service deployment.
+
+**Decision:** Don't introduce Kong solely for this service. OpenShift Route + HPA covers TLS, load balancing, and connection limits with zero additional infrastructure. If the organization already has Kong deployed cluster-wide, place the gateway behind it opportunistically.
+
+#### Option B: Rewrite proxy layer in Go/Rust — REJECTED
+
+**Arguments for:**
+- Go is the standard language for proxies (Traefik, Caddy, CoreDNS). Goroutines are ~2KB stack vs ~8KB per Python coroutine, native concurrency without GIL, compiled speed for JSON parsing.
+- CPU-bound work on the hot path (JSON parsing, SHA-256 fingerprinting) blocks the Python event loop. In Go this would be trivially parallel across goroutines.
+- Python `json.loads` is ~3-5x slower than Go `encoding/json`. For a proxy that parses every body, this is measurable.
+- On OpenShift with resource quotas, Go pods use 2-4x less CPU and memory for equivalent throughput. Fewer pods = lower cost.
+
+**Arguments against:**
+- The bottleneck is I/O, not CPU. The dominant cost per request is waiting for ES to respond (10-100ms) and writing the event to ES (5-20ms). JSON parse + DSL walk + SHA-256 is ~0.2-1ms for a typical search body — less than 1% of wall clock time.
+- This is an observation tool, not a load balancer. A typical ES cluster serves 1k-5k rps. Python with horizontal scaling handles this comfortably.
+- The DSL extractor is ~500 lines of recursive tree walking, lookback parsing, bulk/msearch NDJSON handling. This is exactly where Python excels — the same logic in Go would be 3x the code with 3x the bug surface area.
+- A rewrite costs weeks-months and introduces new bugs in working, tested code. Adding 2 more OpenShift pods achieves the same throughput gain for zero engineering cost.
+- FastAPI/Uvicorn benchmarks (TechEmpower) show ~15k-30k req/s for JSON workloads per process. With 4 workers per pod and 3 pods = 12 processes, theoretical capacity is 180k-360k simple req/s. Even at 1/10th (proxy + parsing overhead), that's 18k-36k rps across the deployment.
+
+**Decision:** Stay with Python. The observation/extraction logic is the product's core value and Python is the right language for it. The proxy overhead is noise compared to ES response times. If the gateway ever needs to handle >50k rps, the escape hatch is a Go rewrite of the proxy layer with Python as an analysis sidecar — but that's a bridge to cross when measured, not speculated.
+
+#### Option C: Harden the existing Python stack — ACCEPTED
+
+The current codebase had specific scaling bottlenecks that were implementation-level, not architectural. Fixing these kept the tech stack while achieving production-grade throughput.
+
+| Problem | Location | Impact | Fix |
+|---|---|---|---|
+| Single-doc event writes | `events.py` `emit_event()` | 1 ES index call per request. At 1k rps = 1k writes/sec | Buffer events in-memory, flush via `_bulk` every 500ms or 100 events |
+| Unbounded background tasks | `events.py` `emit_event_background()` | No backpressure. Slow ES → unbounded task accumulation → OOM | `asyncio.Queue` with bounded size + fixed consumer pool |
+| Single Uvicorn process | `main.py` `uvicorn.run()` | Zero CPU parallelism, single event loop | Multiple workers via `--workers` flag |
+| Full body buffering | `proxy.py` `await request.body()` | Large bulk requests spike memory | httpx streaming for request/response bodies above a size threshold |
+| New httpx client per health check | `main.py` `health()` | Connection churn under monitoring | Reuse existing shared client |
+| New httpx client per sample-events call | `main.py` `sample_events()` | Same connection churn | Reuse existing shared client |
+
+---
+
+## 2026-02-08 — UI Overhaul & Kibana Dashboards
+
+- Extracted UI from inline Python string to standalone `gateway/ui.html` (edit + refresh, no restart)
+- Grouped monitor metrics by category (proxy, events, performance, system)
+- Added reset metrics button
+- Added programmatic Kibana dashboard setup (`kibana_setup.py`)
+- Switched dashboards to aggregate on `index_group` instead of raw `index`
+- Added screenshots to README
+
+---
+
+## 2026-02-07 — Event Sampling & Write Operations
+
+- Replaced adaptive sampling and rollup system with simple `EVENT_SAMPLE_RATE` (0.0-1.0)
+- Added write operation support: extract fields from `_bulk` index/create/update actions
+- Added `doc`/`upsert` unwrapping for update operations
+- Fixed event fan-out bug: emit one event per query instead of one per concrete index
+
+**Lesson learned:** Adaptive sampling added complexity without proportional value. A simple rate slider (adjustable at runtime) is easier to understand, debug, and explain to the team.
+
+---
+
+## 2026-02-06 — Multi-Index Support & Monitoring
+
+- Added index group resolution (alias/data stream → logical group)
+- Added metadata cache with periodic refresh from `GET /_aliases` and `GET /_data_stream/*`
+- Added lookback window detection from `range` queries with `now-*` syntax
+- Added query body storage with configurable sampling
+- Added monitoring tab with auto-refresh stats
+- Added request timing middleware
+- Architect-level code review: fixed bugs, simplified abstractions, added ARCHITECTURE.md
+
+---
+
+## 2026-02-05 — Scenarios & Generator
+
+- Added logs and orders indices to seeder (alongside products)
+- Added scenario-based query templates with weighted distributions
+- Added scenario-aware generator endpoint with dynamic UI controls
+- Added tier recommendations to heat report (hot/warm/cold/frozen with actionable suggestions)
+
+---
+
+## 2026-02-04 — Initial Release
+
+- ES Usage Gateway MVP: FastAPI reverse proxy, DSL field extraction, heat analysis
+- Supports `match`, `term`, `range`, `bool`, `multi_match`, `nested`, and 10+ other query types
+- Usage events stored in `.usage-events` index
+- Heat report API with index-level and field-level tiers
+- CLI traffic generator
+- 14 tests covering extractor, events, analyzer, metadata, metrics, and query templates

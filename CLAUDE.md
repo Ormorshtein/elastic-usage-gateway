@@ -1,42 +1,14 @@
 # ES Usage Gateway — Project Guide
 
-## What This Is
+## Audience
 
-A reverse proxy gateway that sits in front of Elasticsearch, intercepts all traffic, extracts usage metadata from requests (which fields are queried, filtered, aggregated, sorted, fetched), and computes field-level heat scores. Includes a control panel UI and Kibana dashboards.
+This project ships to an on-prem environment and will be maintained by a team of junior engineers. Optimize for readability and simplicity:
 
-## Architecture
-
-- **ES + Kibana**: Docker containers via `docker-compose.yml` (ports 9200, 5601)
-- **Gateway**: Local Python process — FastAPI + httpx async proxy (port 9301)
-- **UI**: Inline HTML served by gateway at `/_gateway/ui` (no build step)
-
-## Running
-
-```bash
-docker compose up -d                    # Start ES + Kibana
-python -m generator.seed                # Seed products index (once)
-python -m gateway.main                  # Start gateway on :9301
-python kibana_setup.py --no-wait        # Import Kibana dashboards
-restart-gateway.bat                     # Kill + restart gateway (Windows)
-```
-
-## Project Structure
-
-```
-gateway/main.py       — FastAPI app, all routes
-gateway/proxy.py      — Reverse proxy (httpx)
-gateway/extractor.py  — DSL field extraction from ES requests
-gateway/events.py     — Usage event model + emission to .usage-events index
-gateway/analyzer.py   — Heat score computation
-gateway/ui.py         — UI loader (reads ui.html from disk per request)
-gateway/ui.html       — Control panel HTML/CSS/JS (edit + refresh, no restart)
-generator/seed.py     — Load sample products into ES
-generator/generate.py — CLI traffic generator
-generator/queries.py  — Query templates with weighted distribution
-kibana_setup.py       — Programmatic Kibana dashboard/visualization setup
-config.py             — ES host, gateway port, index names
-restart-gateway.bat   — Kill + restart gateway process (Windows)
-```
+- Prefer explicit over clever. Obvious code > elegant code.
+- Prefer flat over nested. Avoid deep abstractions or indirection layers that require jumping between files to understand a flow.
+- Name things for clarity, not brevity. A long descriptive name is better than a short ambiguous one.
+- Keep dependencies minimal. Every added library is something the team needs to learn and maintain.
+- Comments should explain *why*, not *what*. If the *what* isn't obvious, simplify the code.
 
 ## Code Conventions
 
@@ -46,6 +18,12 @@ restart-gateway.bat   — Kill + restart gateway process (Windows)
 - Gateway UI is vanilla HTML/CSS/JS in `gateway/ui.html` (no build step)
   - Read from disk on each request — edit and refresh browser, no gateway restart needed
 - Logging via stdlib `logging`, not print()
+
+## Testing
+
+```bash
+pytest tests/
+```
 
 ## Git Workflow
 
@@ -73,15 +51,17 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 
 Types: `feat`, `fix`, `refactor`, `docs`, `chore`
 
-Examples:
-- `feat: add per-query-type breakdown to generator UI`
-- `fix: escape JS newline in Python string to prevent syntax error`
-- `refactor: replace tag clouds with data tables in Kibana dashboard`
-- `chore: add .gitignore and initialize git repo`
-
 ### What NOT to Commit
 - `__pycache__/`, `.pyc` files
 - `.claude/` directory
 - `.env` or credential files
 - Docker volumes / ES data
 - IDE config (`.vscode/`, `.idea/`)
+
+## Keeping Docs in Sync
+
+After completing work, update docs to stay in sync:
+
+- **CHANGELOG.md** — Add an entry for any new feature, bug fix, or significant change
+- **ARCHITECTURE.md** — Update if project structure, API endpoints, or components changed
+- **This file** — Update if new coding standards or gotchas were discovered
