@@ -111,6 +111,47 @@ class TestBuildEvent:
         )
         assert event["client_id"] == "my-app"
 
+    def test_client_ip(self):
+        refs = FieldRefs()
+        event = build_event(
+            index_name="x", operation="search", field_refs=refs,
+            method="POST", path="/x/_search", response_status=200, elapsed_ms=0,
+            client_ip="10.2.34.56",
+        )
+        assert event["client_ip"] == "10.2.34.56"
+
+    def test_client_user_agent(self):
+        refs = FieldRefs()
+        event = build_event(
+            index_name="x", operation="search", field_refs=refs,
+            method="POST", path="/x/_search", response_status=200, elapsed_ms=0,
+            client_user_agent="elasticsearch-py/8.12",
+        )
+        assert event["client_user_agent"] == "elasticsearch-py/8.12"
+
+    def test_client_fields_default_to_none(self):
+        refs = FieldRefs()
+        event = build_event(
+            index_name="x", operation="search", field_refs=refs,
+            method="POST", path="/x/_search", response_status=200, elapsed_ms=0,
+        )
+        assert event["client_id"] is None
+        assert event["client_ip"] is None
+        assert event["client_user_agent"] is None
+
+    def test_all_client_fields_together(self):
+        refs = FieldRefs()
+        event = build_event(
+            index_name="x", operation="search", field_refs=refs,
+            method="POST", path="/x/_search", response_status=200, elapsed_ms=0,
+            client_id="order-service",
+            client_ip="10.2.34.56",
+            client_user_agent="kibana/8.12.2",
+        )
+        assert event["client_id"] == "order-service"
+        assert event["client_ip"] == "10.2.34.56"
+        assert event["client_user_agent"] == "kibana/8.12.2"
+
     def test_index_group_explicit(self):
         refs = FieldRefs()
         event = build_event(

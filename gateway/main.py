@@ -316,6 +316,8 @@ async def generate(req: GenerateRequest):
                 response_status=resp.status_code,
                 elapsed_ms=elapsed_ms,
                 client_id="control-panel",
+                client_ip="127.0.0.1",
+                client_user_agent="gateway-generator",
                 body=body_bytes,
                 index_group=group,
             )
@@ -343,10 +345,10 @@ async def clear_events():
     )
 
 
-# --- Catch-all proxy route ---
+# --- Fallback proxy route (matches everything not handled above) ---
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"])
-async def proxy_catchall(request: Request):
+async def proxy_fallback(request: Request):
     """
     Proxy all traffic to Elasticsearch.
 
@@ -392,6 +394,8 @@ async def proxy_catchall(request: Request):
 
     # Step 3+4: build and emit one event per query
     client_id = request.headers.get("x-client-id")
+    client_ip = request.client.host if request.client else None
+    client_user_agent = request.headers.get("user-agent")
     idx = indices[0] if indices else None
     group = metadata_mod.resolve_group(idx) if idx else None
     event = build_event(
@@ -403,6 +407,8 @@ async def proxy_catchall(request: Request):
         response_status=metadata["response_status"],
         elapsed_ms=metadata["elapsed_ms"],
         client_id=client_id,
+        client_ip=client_ip,
+        client_user_agent=client_user_agent,
         body=metadata["body"],
         index_group=group,
     )

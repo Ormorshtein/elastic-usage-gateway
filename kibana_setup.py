@@ -380,6 +380,16 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "- Use the raw events table (bottom of dashboard) filtered by `query_template_hash` to see actual query bodies for a pattern.",
     ))
     objects.append(_markdown(
+        "md-header-client-attribution", "Section: Client Attribution",
+        "## Client Attribution\n"
+        "Which clients (services, users, tools) are sending queries, broken down by IP, User-Agent, and optional `x-client-id` header.\n\n"
+        "**How to act on this:**\n"
+        "- **Before changing a field mapping**, check the *Fields by Client* table below — it tells you exactly which clients depend on that field and who to notify.\n"
+        "- **Unknown IPs or User-Agents** appearing in traffic may indicate unauthorized access, runaway scripts, or a new service that hasn't registered an `x-client-id` header.\n"
+        "- **Encourage teams to set the `x-client-id` header** — IP and User-Agent help, but an explicit ID (e.g. `order-service`) makes impact analysis trivial.\n"
+        "- **High-traffic clients** (top of the count table) should be checked for query efficiency — a single service generating 80% of traffic is your best optimization target.",
+    ))
+    objects.append(_markdown(
         "md-header-lookback", "Section: Lookback Analysis",
         "## Lookback Analysis\n"
         "How far back queries look in time (`now-Xh` ranges) — directly informs ILM tiering decisions.\n\n"
@@ -499,6 +509,101 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     ))
 
     # =========================================================
+    # CLIENT ATTRIBUTION VISUALIZATIONS
+    # =========================================================
+
+    # Top Clients — table showing most active clients by count
+    objects.append(_vis(
+        "vis-top-clients", "Top Clients (by request count)", "table",
+        {**TABLE_PARAMS, "percentageCol": "Count"},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "avg",
+             "params": {"field": "response_time_ms"}, "schema": "metric"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "client_id", "size": 20,
+                        "order": "desc", "orderBy": "1",
+                        "missingBucket": True, "missingBucketLabel": "(no x-client-id)"},
+             "schema": "bucket"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Client Traffic by IP — table showing distinct client IPs
+    objects.append(_vis(
+        "vis-clients-by-ip", "Client Traffic by IP", "table",
+        {**TABLE_PARAMS, "percentageCol": "Count"},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "cardinality",
+             "params": {"field": "client_user_agent"}, "schema": "metric"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "client_ip", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Client Usage by Index Group — which clients hit which indices
+    objects.append(_vis(
+        "vis-clients-by-group", "Client Usage by Index Group", "table",
+        TABLE_PARAMS,
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "client_id", "size": 20,
+                        "order": "desc", "orderBy": "1",
+                        "missingBucket": True, "missingBucketLabel": "(no x-client-id)"},
+             "schema": "bucket"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "index_group", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Fields by Client — which clients depend on which fields (queried + filtered)
+    objects.append(_vis(
+        "vis-fields-by-client", "Queried & Filtered Fields by Client", "table",
+        TABLE_PARAMS,
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "client_id", "size": 20,
+                        "order": "desc", "orderBy": "1",
+                        "missingBucket": True, "missingBucketLabel": "(no x-client-id)"},
+             "schema": "bucket"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "fields.queried", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Client User-Agents — pie chart to quickly identify Kibana vs app vs script traffic
+    objects.append(_vis(
+        "vis-client-user-agents", "Client User-Agents", "pie",
+        {"type": "pie", "addTooltip": True, "addLegend": True, "legendPosition": "right", "isDonut": True,
+         "labels": {"show": True, "values": True, "last_level": True, "truncate": 100}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "client_user_agent", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # =========================================================
     # LOOKBACK VISUALIZATIONS (query time-range window analysis)
     # =========================================================
 
@@ -574,7 +679,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "type": "search",
         "attributes": {
             "title": "Usage Events — Raw Queries",
-            "columns": ["timestamp", "index_group", "operation", "lookback_label", "path", "query_body", "response_status", "response_time_ms"],
+            "columns": ["timestamp", "index_group", "operation", "client_id", "client_ip", "client_user_agent", "lookback_label", "path", "query_body", "response_status", "response_time_ms"],
             "sort": [["timestamp", "desc"]],
             "kibanaSavedObjectMeta": {
                 "searchSourceJSON": json.dumps({
@@ -768,10 +873,13 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     #   y=79:  [header] Query Patterns
     #   y=84:  top templates, templates over time
     #   y=98:  costliest templates, templates by group
-    #   y=110: [header] Lookback Analysis
-    #   y=115: lookback distribution, lookback fields
-    #   y=129: [header] Raw Events
-    #   y=134: raw events table
+    #   y=110: [header] Client Attribution
+    #   y=115: top clients, clients by IP, user-agents
+    #   y=129: clients by group, fields by client
+    #   y=143: [header] Lookback Analysis
+    #   y=148: lookback distribution, lookback fields
+    #   y=162: [header] Raw Events
+    #   y=167: raw events table
     control_input, control_refs = _control_group_input(usage_dv_id)
     usage_panels = [
         # --- Section: Overview ---
@@ -800,18 +908,25 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         panel_ref(19, "vis-templates-over-time",     24, 84, 24, 14),
         panel_ref(20, "vis-costliest-templates",      0, 98, 24, 12),
         panel_ref(21, "vis-templates-by-group",      24, 98, 24, 12),
+        # --- Section: Client Attribution ---
+        panel_ref(22, "md-header-client-attribution",  0, 110, 48,  5),
+        panel_ref(23, "vis-top-clients",               0, 115, 16, 14),
+        panel_ref(24, "vis-clients-by-ip",            16, 115, 16, 14),
+        panel_ref(25, "vis-client-user-agents",       32, 115, 16, 14),
+        panel_ref(26, "vis-clients-by-group",          0, 129, 24, 14),
+        panel_ref(27, "vis-fields-by-client",         24, 129, 24, 14),
         # --- Section: Lookback Analysis ---
-        panel_ref(22, "md-header-lookback",           0, 110, 48,  5),
-        panel_ref(23, "vis-lookback-distribution",    0, 115, 24, 14),
-        panel_ref(24, "vis-lookback-fields",         24, 115, 24, 14),
+        panel_ref(28, "md-header-lookback",            0, 143, 48,  5),
+        panel_ref(29, "vis-lookback-distribution",     0, 148, 24, 14),
+        panel_ref(30, "vis-lookback-fields",          24, 148, 24, 14),
         # --- Section: Raw Events ---
-        panel_ref(25, "md-header-raw-events",         0, 129, 48,  5),
+        panel_ref(31, "md-header-raw-events",          0, 162, 48,  5),
         {
-            "panelIndex": "26",
-            "gridData": {"x": 0, "y": 134, "w": 48, "h": 18, "i": "26"},
+            "panelIndex": "32",
+            "gridData": {"x": 0, "y": 167, "w": 48, "h": 18, "i": "32"},
             "version": "8.12.2",
             "type": "search",
-            "panelRefName": "panel_26",
+            "panelRefName": "panel_32",
         },
     ]
     usage_refs = [
@@ -837,11 +952,17 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         {"name": "panel_19", "type": "visualization", "id": "vis-templates-over-time"},
         {"name": "panel_20", "type": "visualization", "id": "vis-costliest-templates"},
         {"name": "panel_21", "type": "visualization", "id": "vis-templates-by-group"},
-        {"name": "panel_22", "type": "visualization", "id": "md-header-lookback"},
-        {"name": "panel_23", "type": "visualization", "id": "vis-lookback-distribution"},
-        {"name": "panel_24", "type": "visualization", "id": "vis-lookback-fields"},
-        {"name": "panel_25", "type": "visualization", "id": "md-header-raw-events"},
-        {"name": "panel_26", "type": "search", "id": "search-usage-events"},
+        {"name": "panel_22", "type": "visualization", "id": "md-header-client-attribution"},
+        {"name": "panel_23", "type": "visualization", "id": "vis-top-clients"},
+        {"name": "panel_24", "type": "visualization", "id": "vis-clients-by-ip"},
+        {"name": "panel_25", "type": "visualization", "id": "vis-client-user-agents"},
+        {"name": "panel_26", "type": "visualization", "id": "vis-clients-by-group"},
+        {"name": "panel_27", "type": "visualization", "id": "vis-fields-by-client"},
+        {"name": "panel_28", "type": "visualization", "id": "md-header-lookback"},
+        {"name": "panel_29", "type": "visualization", "id": "vis-lookback-distribution"},
+        {"name": "panel_30", "type": "visualization", "id": "vis-lookback-fields"},
+        {"name": "panel_31", "type": "visualization", "id": "md-header-raw-events"},
+        {"name": "panel_32", "type": "search", "id": "search-usage-events"},
     ] + control_refs
     objects.append({
         "id": "usage-heat",
