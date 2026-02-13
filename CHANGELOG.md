@@ -4,6 +4,31 @@ Reverse-chronological record of significant changes, decisions, and lessons lear
 
 ---
 
+## 2026-02-13 — Deliverable 1: Fix Parsing Blind Spots (Gaps 1-9)
+
+Closed all 9 MUST-HAVE parsing gaps identified in research.md. The extractor now covers the DSL features that real production traffic (especially Kibana) uses heavily.
+
+**New operation support:**
+- `_async_search` — Kibana routes 20-50% of searches through this; was completely invisible
+- `_update_by_query` / `_delete_by_query` — GDPR cleanup, log rotation, data migrations
+
+**New field extraction in search bodies:**
+- `docvalue_fields` (string and `{"field": ..., "format": ...}` formats) → `sourced`
+- `stored_fields` → `sourced`
+- `highlight.fields` → `queried`
+- `suggest` (completion, term, phrase suggesters) → `queried`
+- `collapse.field` → `filtered`
+
+**Bug fixes:**
+- Composite agg sources — fields nested inside `sources[].name.type.field` were silently missed
+- Filter/filters agg queries — query clauses inside filter bucket aggs were not parsed for field references
+
+**Tests:** 24 new tests (86 total in test_extractor.py, 210 total across all test files). Zero regressions.
+
+**Files changed:** `gateway/extractor.py`, `tests/test_extractor.py`
+
+---
+
 ## 2026-02-12 — Competitive Research & Feature Roadmap
 
 Added [RESEARCH.md](RESEARCH.md) with comprehensive analysis of the ES ecosystem, competitive landscape, parsing gaps, and prioritized feature roadmap.

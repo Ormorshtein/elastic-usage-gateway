@@ -70,17 +70,18 @@ For request bodies below `PROXY_BODY_LIMIT` (default 1MB), the body is buffered 
 ### gateway/extractor.py — DSL Field Extractor
 
 Walks Elasticsearch Query DSL JSON to extract field references into categories:
-- **queried**: Fields in `match`, `term`, `multi_match`, `exists`, etc.
-- **filtered**: Fields inside `bool.filter` context (propagated through nested bools).
-- **aggregated**: Fields in `aggs` (terms, avg, sum, date_histogram, etc.).
+- **queried**: Fields in `match`, `term`, `multi_match`, `exists`, `highlight`, suggesters, etc.
+- **filtered**: Fields inside `bool.filter` context, `post_filter`, `collapse`, filter agg queries.
+- **aggregated**: Fields in `aggs` (terms, avg, sum, date_histogram, composite sources, etc.).
 - **sorted**: Fields in `sort` clauses.
-- **sourced**: Fields in `_source` includes/excludes.
+- **sourced**: Fields in `_source`, `docvalue_fields`, `stored_fields`.
 - **written**: Fields in document bodies (index, create, update via bulk).
 
 Also extracts **lookback** information from `range` queries with `now-*` syntax.
 
-Handles three request formats:
-- **Search/count**: Standard JSON query body
+Handles five request formats:
+- **Search/count/async_search**: Standard JSON query body
+- **Update_by_query/delete_by_query**: Standard DSL query body
 - **Bulk**: NDJSON alternating action/document lines (with update `doc`/`upsert` unwrapping)
 - **Msearch**: NDJSON alternating header/query lines
 
@@ -290,7 +291,8 @@ For the full tech stack evaluation (Kong, Go rewrite, and why we hardened Python
 ## Known Limitations
 
 - **No authentication**: The gateway does not add auth headers. Designed for same-trust-zone deployment.
-- **No SQL query parsing**: Only DSL queries are analyzed. ES SQL queries pass through unobserved.
+- **No SQL/ES|QL query parsing**: Only DSL queries are analyzed. ES SQL and ES|QL queries pass through unobserved.
+- **No Painless script field extraction**: Fields accessed via `doc['field']` in scripts (script_fields, runtime_mappings, function_score) are not tracked.
 - **Partial msearch support**: msearch query bodies are parsed, but per-query index targeting from headers is not tracked.
 - **No streaming**: Large request/response bodies above 1MB are streamed, but observation (field extraction) only applies to buffered bodies below the threshold.
 - **Horizontal scaling**: Supports multiple Uvicorn workers per pod and multiple pods via OpenShift HPA. State is per-process (no shared state required).

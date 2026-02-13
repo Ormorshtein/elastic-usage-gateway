@@ -513,3 +513,271 @@ class TestMsearchExtraction:
         indices, op, refs = extract_from_request("/_msearch", "POST", body)
         assert op == "msearch"
         assert refs.queried == {"title"}
+
+
+# --- Gap 1: _async_search ---
+
+class TestAsyncSearch:
+    def test_async_search_extracts_like_search(self):
+        body = json.dumps({
+            "query": {"bool": {
+                "must": [{"match": {"title": "laptop"}}],
+                "filter": [{"term": {"category": "electronics"}}],
+            }},
+            "sort": [{"price": "desc"}],
+        }).encode()
+        indices, op, refs = extract_from_request("/products/_async_search", "POST", body)
+        assert indices == ["products"]
+        assert op == "async_search"
+        assert refs.queried == {"title"}
+        assert refs.filtered == {"category"}
+        assert refs.sorted == {"price"}
+
+    def test_async_search_empty_body(self):
+        indices, op, refs = extract_from_request("/products/_async_search", "POST", b"")
+        assert op == "async_search"
+        assert refs.all_fields == set()
+
+
+# --- Gap 2: docvalue_fields ---
+
+class TestDocvalueFields:
+    def test_string_format(self):
+        body = {"docvalue_fields": ["timestamp", "status_code"]}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"timestamp", "status_code"}
+
+    def test_object_format(self):
+        body = {"docvalue_fields": [
+            {"field": "timestamp", "format": "date_time"},
+            {"field": "level", "format": "use_field_mapping"},
+        ]}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"timestamp", "level"}
+
+    def test_mixed_format(self):
+        body = {"docvalue_fields": [
+            "status_code",
+            {"field": "timestamp", "format": "date_time"},
+        ]}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"status_code", "timestamp"}
+
+
+# --- Gap 3: highlight ---
+
+class TestHighlight:
+    def test_simple_highlight(self):
+        body = {"highlight": {"fields": {"title": {}, "description": {}}}}
+        refs = extract_fields_from_search(body)
+        assert refs.queried == {"title", "description"}
+
+    def test_highlight_with_config(self):
+        body = {"highlight": {"fields": {
+            "title": {"fragment_size": 100},
+            "body": {"number_of_fragments": 3, "fragment_size": 200},
+        }}}
+        refs = extract_fields_from_search(body)
+        assert refs.queried == {"title", "body"}
+
+    def test_highlight_combined_with_query(self):
+        body = {
+            "query": {"match": {"title": "laptop"}},
+            "highlight": {"fields": {"title": {}, "description": {}}},
+        }
+        refs = extract_fields_from_search(body)
+        assert refs.queried == {"title", "description"}
+
+
+# --- Gap 4: _update_by_query / _delete_by_query ---
+
+class TestUpdateDeleteByQuery:
+    def test_update_by_query(self):
+        body = json.dumps({
+            "query": {"term": {"status": "old"}},
+        }).encode()
+        indices, op, refs = extract_from_request("/products/_update_by_query", "POST", body)
+        assert indices == ["products"]
+        assert op == "update_by_query"
+        assert refs.queried == {"status"}
+
+    def test_delete_by_query(self):
+        body = json.dumps({
+            "query": {"range": {"created_at": {"lte": "now-90d"}}},
+        }).encode()
+        indices, op, refs = extract_from_request("/logs/_delete_by_query", "POST", body)
+        assert indices == ["logs"]
+        assert op == "delete_by_query"
+        assert refs.queried == {"created_at"}
+
+    def test_update_by_query_with_bool(self):
+        body = json.dumps({
+            "query": {"bool": {
+                "filter": [{"term": {"status": "inactive"}}],
+            }},
+        }).encode()
+        indices, op, refs = extract_from_request("/users/_update_by_query", "POST", body)
+        assert refs.filtered == {"status"}
+        assert refs.queried == set()
+
+
+# --- Gap 5: stored_fields ---
+
+class TestStoredFields:
+    def test_stored_fields_list(self):
+        body = {"stored_fields": ["title", "price", "category"]}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"title", "price", "category"}
+
+    def test_stored_fields_ignores_internal(self):
+        body = {"stored_fields": ["title", "_routing"]}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"title"}
+
+
+# --- Gap 6: suggesters ---
+
+class TestSuggesters:
+    def test_completion_suggester(self):
+        body = {"suggest": {
+            "title-suggest": {
+                "text": "lapt",
+                "completion": {"field": "title.suggest", "fuzzy": {"fuzziness": "auto"}},
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.queried == {"title.suggest"}
+
+    def test_term_suggester(self):
+        body = {"suggest": {
+            "spell-check": {
+                "text": "laptpo",
+                "term": {"field": "title"},
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.queried == {"title"}
+
+    def test_phrase_suggester(self):
+        body = {"suggest": {
+            "phrase-suggest": {
+                "text": "laptpo chargr",
+                "phrase": {"field": "title"},
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.queried == {"title"}
+
+    def test_multiple_suggesters(self):
+        body = {"suggest": {
+            "autocomplete": {
+                "text": "lap",
+                "completion": {"field": "title.suggest"},
+            },
+            "did-you-mean": {
+                "text": "laptpo",
+                "term": {"field": "title"},
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.queried == {"title.suggest", "title"}
+
+
+# --- Gap 7: field collapsing ---
+
+class TestFieldCollapsing:
+    def test_simple_collapse(self):
+        body = {"query": {"match_all": {}}, "collapse": {"field": "brand"}}
+        refs = extract_fields_from_search(body)
+        assert refs.filtered == {"brand"}
+
+    def test_collapse_combined_with_filter(self):
+        body = {
+            "query": {"bool": {
+                "filter": [{"term": {"category": "electronics"}}],
+            }},
+            "collapse": {"field": "brand"},
+        }
+        refs = extract_fields_from_search(body)
+        assert refs.filtered == {"category", "brand"}
+
+
+# --- Gap 8: composite agg sources bug ---
+
+class TestCompositeAggSources:
+    def test_composite_terms_and_date_histogram(self):
+        body = {"aggs": {
+            "my_composite": {
+                "composite": {
+                    "sources": [
+                        {"category_src": {"terms": {"field": "category"}}},
+                        {"date_bucket": {"date_histogram": {"field": "order_date", "calendar_interval": "month"}}},
+                    ],
+                },
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.aggregated == {"category", "order_date"}
+
+    def test_composite_with_sub_aggs(self):
+        body = {"aggs": {
+            "my_composite": {
+                "composite": {
+                    "sources": [
+                        {"brand_src": {"terms": {"field": "brand"}}},
+                    ],
+                },
+                "aggs": {
+                    "avg_price": {"avg": {"field": "price"}},
+                },
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.aggregated == {"brand", "price"}
+
+
+# --- Gap 9: filter/filters agg queries bug ---
+
+class TestFilterAggQueries:
+    def test_filter_agg_extracts_query_fields(self):
+        body = {"aggs": {
+            "active_products": {
+                "filter": {"term": {"status": "active"}},
+                "aggs": {
+                    "avg_price": {"avg": {"field": "price"}},
+                },
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.filtered == {"status"}
+        assert refs.aggregated == {"price"}
+
+    def test_filters_agg_extracts_named_queries(self):
+        body = {"aggs": {
+            "messages": {
+                "filters": {
+                    "filters": {
+                        "errors": {"term": {"level": "error"}},
+                        "warnings": {"term": {"level": "warning"}},
+                    },
+                },
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.filtered == {"level"}
+
+    def test_filter_agg_with_bool_query(self):
+        body = {"aggs": {
+            "recent_active": {
+                "filter": {"bool": {
+                    "must": [{"term": {"status": "active"}}],
+                    "filter": [{"range": {"created_at": {"gte": "now-7d"}}}],
+                }},
+                "aggs": {
+                    "by_category": {"terms": {"field": "category"}},
+                },
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.filtered == {"status", "created_at"}
+        assert refs.aggregated == {"category"}

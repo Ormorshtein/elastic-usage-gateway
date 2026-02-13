@@ -187,7 +187,7 @@ def _extract_query_fields(
             continue
 
 
-def _extract_agg_fields(aggs: dict, target: set[str]) -> None:
+def _extract_agg_fields(aggs: dict, target: set[str], refs: FieldRefs | None = None) -> None:
     """Extract field names from aggregation definitions."""
     if not isinstance(aggs, dict):
         return
@@ -197,18 +197,49 @@ def _extract_agg_fields(aggs: dict, target: set[str]) -> None:
             continue
 
         for agg_type in (*_METRIC_AGG_TYPES, *_BUCKET_AGG_TYPES):
-            if agg_type in agg_def:
-                agg_body = agg_def[agg_type]
-                if isinstance(agg_body, dict):
-                    field_name = agg_body.get("field")
-                    if field_name and _is_user_field(field_name):
-                        target.add(field_name)
+            if agg_type not in agg_def:
+                continue
+            agg_body = agg_def[agg_type]
+            if not isinstance(agg_body, dict):
+                continue
+
+            field_name = agg_body.get("field")
+            if field_name and _is_user_field(field_name):
+                target.add(field_name)
+
+            # Composite agg: fields are nested inside sources array
+            if agg_type == "composite":
+                sources = agg_body.get("sources")
+                if isinstance(sources, list):
+                    for source_item in sources:
+                        if not isinstance(source_item, dict):
+                            continue
+                        for _source_name, source_spec in source_item.items():
+                            if not isinstance(source_spec, dict):
+                                continue
+                            for _inner_type, inner_body in source_spec.items():
+                                if isinstance(inner_body, dict):
+                                    f = inner_body.get("field")
+                                    if f and _is_user_field(f):
+                                        target.add(f)
+
+            # Filter agg: body is a query, not {"field": ...}
+            if agg_type == "filter" and refs is not None:
+                _extract_query_fields(agg_body, refs, context="filtered")
+
+            # Filters agg: named filter queries
+            if agg_type == "filters" and refs is not None:
+                filters_dict = agg_body.get("filters")
+                if isinstance(filters_dict, dict):
+                    for _filter_name, filter_query in filters_dict.items():
+                        if isinstance(filter_query, dict):
+                            _extract_query_fields(filter_query, refs, context="filtered")
 
         # Recurse into sub-aggregations
         for sub_key in ("aggs", "aggregations"):
             sub_aggs = agg_def.get(sub_key)
             if sub_aggs:
-                _extract_agg_fields(sub_aggs, target)
+                _extract_agg_fields(sub_aggs, target, refs)
 
 
 def _extract_sort_fields(sort: list | dict, target: set[str]) -> None:
@@ -259,7 +290,7 @@ def extract_fields_from_search(body: dict) -> FieldRefs:
     for agg_key in ("aggs", "aggregations"):
         aggs = body.get(agg_key)
         if aggs:
-            _extract_agg_fields(aggs, refs.aggregated)
+            _extract_agg_fields(aggs, refs.aggregated, refs)
 
     sort = body.get("sort")
     if sort:
@@ -268,6 +299,53 @@ def extract_fields_from_search(body: dict) -> FieldRefs:
     source = body.get("_source")
     if source is not None:
         _extract_source_fields(source, refs.sourced)
+
+    # docvalue_fields — Kibana Discover uses this heavily (string or {"field": ..., "format": ...})
+    docvalue_fields = body.get("docvalue_fields")
+    if isinstance(docvalue_fields, list):
+        for item in docvalue_fields:
+            if isinstance(item, str) and _is_user_field(item):
+                refs.sourced.add(item)
+            elif isinstance(item, dict):
+                f = item.get("field")
+                if f and _is_user_field(f):
+                    refs.sourced.add(f)
+
+    # stored_fields — explicit stored field retrieval
+    stored_fields = body.get("stored_fields")
+    if isinstance(stored_fields, list):
+        for f in stored_fields:
+            if _is_user_field(f):
+                refs.sourced.add(f)
+
+    # highlight — fields used for search result snippets
+    highlight = body.get("highlight")
+    if isinstance(highlight, dict):
+        hl_fields = highlight.get("fields")
+        if isinstance(hl_fields, dict):
+            for field_name in hl_fields:
+                if _is_user_field(field_name):
+                    refs.queried.add(field_name)
+
+    # suggest — completion, term, phrase suggesters
+    suggest = body.get("suggest")
+    if isinstance(suggest, dict):
+        for suggest_name, suggest_def in suggest.items():
+            if not isinstance(suggest_def, dict):
+                continue
+            for suggest_type in ("completion", "term", "phrase"):
+                inner = suggest_def.get(suggest_type)
+                if isinstance(inner, dict):
+                    f = inner.get("field")
+                    if f and _is_user_field(f):
+                        refs.queried.add(f)
+
+    # collapse — field collapsing (e.g., one result per brand)
+    collapse = body.get("collapse")
+    if isinstance(collapse, dict):
+        f = collapse.get("field")
+        if f and _is_user_field(f):
+            refs.filtered.add(f)
 
     # Pick widest lookback window
     if lookbacks:
@@ -341,7 +419,7 @@ def extract_from_request(
     refs = FieldRefs()
 
     # Map operation names to categories
-    if operation in ("search", "count"):
+    if operation in ("search", "count", "async_search", "update_by_query", "delete_by_query"):
         try:
             parsed = json.loads(body) if body else {}
             if isinstance(parsed, dict):
