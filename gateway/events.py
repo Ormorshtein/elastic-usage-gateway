@@ -118,7 +118,9 @@ USAGE_INDEX_MAPPING = {
                 }
             },
             "language":           {"type": "keyword"},
-            "query_fingerprint": {"type": "keyword"},
+            "query_fingerprint":    {"type": "keyword"},
+            "query_template_hash":  {"type": "keyword"},
+            "query_template_text":  {"type": "keyword", "index": False, "doc_values": False, "ignore_above": 4096},
             "response_time_ms":  {"type": "float"},
             "response_status":   {"type": "integer"},
             "client_id":         {"type": "keyword"},
@@ -169,6 +171,44 @@ def _compute_fingerprint(body: bytes) -> str | None:
         return None
 
 
+def _templatize(obj):
+    """Replace all leaf values with "?" to extract query structure.
+
+    Dicts preserve keys, lists of dicts preserve structure,
+    lists of all scalars collapse to ["?"] so the number of
+    values doesn't affect the template.
+    """
+    if isinstance(obj, dict):
+        return {k: _templatize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        if not obj:
+            return []
+        if all(not isinstance(item, (dict, list)) for item in obj):
+            return ["?"]
+        return [_templatize(item) for item in obj]
+    return "?"
+
+
+def _compute_template(body: bytes) -> tuple[str | None, str | None]:
+    """Compute structural template hash and text from a query body.
+
+    Returns (template_hash, template_text) or (None, None) if body
+    is empty or not valid JSON.
+    """
+    if not body:
+        return None, None
+    try:
+        parsed = json.loads(body)
+        template = _templatize(parsed)
+        canonical = json.dumps(template, sort_keys=True, separators=(",", ":"))
+        template_hash = hashlib.sha256(canonical.encode()).hexdigest()
+        # Readable version with spaces, capped at 4096 chars
+        template_text = json.dumps(template, sort_keys=True, separators=(", ", ": "))[:4096]
+        return template_hash, template_text
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, None
+
+
 def build_event(
     index_name: str | None,
     operation: str,
@@ -185,6 +225,7 @@ def build_event(
     """Build a usage event document."""
     idx = index_name or "_unknown"
     lookback = field_refs.lookback
+    template_hash, template_text = _compute_template(body)
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "cluster_id": CLUSTER_ID,
@@ -196,6 +237,8 @@ def build_event(
         "fields": field_refs.to_dict(),
         "language": language,
         "query_fingerprint": _compute_fingerprint(body),
+        "query_template_hash": template_hash,
+        "query_template_text": template_text,
         "response_time_ms": elapsed_ms,
         "response_status": response_status,
         "client_id": client_id,

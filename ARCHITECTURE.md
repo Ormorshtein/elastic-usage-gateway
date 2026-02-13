@@ -103,16 +103,19 @@ Features:
 - **Bulk writes**: 10-50x more efficient than single-doc writes. One `_bulk` call per batch instead of one `POST /_doc` per event.
 - **Event sampling**: Configurable `EVENT_SAMPLE_RATE` (0.0-1.0) to reduce event volume in production. Field heat (proportional) is unaffected; index heat (absolute ops/hour) scales proportionally but relative rankings are preserved. Runtime-adjustable via UI or config API.
 - **Query fingerprinting**: SHA-256 of canonicalized JSON for deduplication.
+- **Query template hashing**: Structural template (leaf values replaced with `"?"`) and SHA-256 hash for pattern grouping. Two queries with same structure but different values get the same template hash.
 - **Query body storage**: Optional, with configurable sampling rate (runtime-adjustable).
 - **Dedicated httpx client**: Separate from the proxy client to avoid contention.
 
 ### gateway/analyzer.py — Heat Analysis
 
-Reads usage events and computes heat reports:
+Reads usage events and computes heat reports with two field scoring perspectives:
 - **Index heat**: `total_operations / time_window_hours` → hot/warm/cold/frozen tier.
-- **Field heat**: `field_references / total_field_references` (proportion) → hot/warm/cold/unused tier.
+- **Field heat (count-based)**: `field_references / total_field_references` (proportion) → hot/warm/cold/unused tier. Shows which fields are queried most often.
+- **Field heat (time-weighted)**: `sum(response_time_ms) / total_response_time_ms` (proportion) → same tier thresholds. Fields involved in slow queries rank higher — optimizing these saves the most cluster time.
+- **Query patterns**: Groups events by `query_template_hash` (structural template) and reports execution count, total/avg response time, and sample template text per pattern.
 - **Lookback stats**: avg, max, p50 lookback windows per index group.
-- **Recommendations**: Actionable suggestions (freeze index, disable doc_values, set index: false).
+- **Recommendations**: Both scoring methods generate independent recommendations.
 
 Thresholds are configurable via environment variables.
 
@@ -143,7 +146,7 @@ Exposed via `/_gateway/stats` and included in `/_gateway/health` responses.
 
 FastAPI application that wires everything together:
 - Lifespan hook: creates usage index, starts metadata refresh, starts bulk writer, shuts down all httpx clients.
-- Gateway endpoints (`/_gateway/*`): health, stats, heat, groups, sample-events, config, generate, UI.
+- Gateway endpoints (`/_gateway/*`): health, stats, heat, query-patterns, groups, sample-events, config, generate, UI.
 - Catch-all proxy route: observation pipeline for all other traffic with metrics instrumentation.
 - Shared httpx client (`_gw_client`) for gateway endpoints that query ES, avoiding per-request client creation.
 - Supports `GATEWAY_WORKERS` for multi-process parallelism via Uvicorn's `--workers` flag.
@@ -207,6 +210,8 @@ The `.usage-events` index stores one document per observed operation:
   },
   "language": "dsl",
   "query_fingerprint": "a1b2c3...",
+  "query_template_hash": "d4e5f6...",
+  "query_template_text": "{\"query\": {\"bool\": {\"filter\": [{\"range\": {\"timestamp\": {\"gte\": \"?\"}}}], \"must\": [{\"match\": {\"title\": \"?\"}}]}}}",
   "response_time_ms": 42.5,
   "response_status": 200,
   "client_id": "my-app",

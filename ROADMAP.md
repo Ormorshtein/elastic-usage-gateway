@@ -32,20 +32,24 @@ Fix data quality at the foundation — the extractor was silently missing real t
 ---
 
 ## Deliverable 2: Response-Time-Weighted Heat Scoring
-**Status: [ ] NOT STARTED**
+**Status: [x] DONE (2026-02-13)**
 
 **Value:** Currently a field queried 100x at 500ms each looks less important than one queried 10,000x at 1ms. Every mature DB observability tool (pganalyze, MongoDB Atlas) weights by total time, not count. This makes heat rankings more accurate — fields that cause the most total latency get flagged first.
 
 **Scope:**
-- Change `analyzer.py` aggregation query to weight by `response_time_ms` (~20 lines)
+- Added `fields_by_response_time` panel alongside existing `fields` in heat report
+- Added `scoring` metadata explaining both methods
+- ES aggregation query adds `sum` sub-agg on `response_time_ms` (~20 lines)
 - No new data collection needed — `response_time_ms` already exists in events
+- 5 new Kibana visualizations in Usage & Heat Dashboard (one per field category, using `sum(response_time_ms)`)
 
-**Files:** `gateway/analyzer.py`, `tests/test_analyzer.py`
+**Files changed:** `gateway/analyzer.py`, `tests/test_analyzer.py`, `kibana_setup.py`
+**Tests added:** 7 new (217 total)
 
 ---
 
 ## Deliverable 3: Query Template Clustering (Feature 1)
-**Status: [ ] NOT STARTED**
+**Status: [x] DONE (2026-02-13)**
 
 **Value:** 10,000 unique fingerprints may represent only 15 query patterns. Without structural grouping, you can't answer "which query pattern drives the most load?" or detect when a new pattern appears. Prerequisite for cost attribution and pattern drift detection.
 
@@ -54,8 +58,31 @@ Fix data quality at the foundation — the extractor was silently missing real t
 - New event fields: `query_template`, `query_template_text`
 - New endpoint: `GET /_gateway/query-patterns`
 - Pattern drift detection between time windows
+- Kibana panels + dashboard section headers (see below)
 
-**Files:** `gateway/extractor.py`, `gateway/events.py`, `gateway/main.py`, tests
+**Files changed:** `gateway/events.py`, `gateway/analyzer.py`, `gateway/main.py`, `kibana_setup.py`, `tests/test_events.py`, `tests/test_analyzer.py`
+**Tests added:** 28 new (244 total)
+
+### Kibana Panels
+
+Also reorganize the existing Usage & Heat dashboard with **Markdown section headers** so each group of panels is introduced with a title and a one-line explanation. Current layout has no visual separation — panels just flow together.
+
+New section headers (Markdown visualization panels):
+- **Overview** — Traffic volume, index groups, and query type breakdown.
+- **Field Heat (by Count)** — Which fields are used most often, by operation type.
+- **Field Heat (by Response Time)** — Which fields cause the most total latency.
+- **Query Patterns** *(new, D3)* — Which structural query shapes drive traffic and cost.
+- **Lookback Analysis** — How far back queries look in time.
+- **Raw Events** — Individual query-level event log.
+
+New panels in the "Query Patterns" section:
+
+| Panel | Type | Metric | Insight |
+|-------|------|--------|---------|
+| Top Query Templates | table | count by `query_template_hash`, show `query_template_text` | "3 query shapes account for 73% of traffic" — tells you where to focus optimization |
+| Query Templates Over Time | stacked area | count over time, split by `query_template_hash` | Pattern drift — a new color band means a new query shape entered production (deploy, new dashboard, runaway script) |
+| Costliest Query Templates | horizontal bar | `sum(response_time_ms)` by template | Total cluster time consumed per pattern — 4,200 calls × 42ms = 176s matters more than 10 calls × 2s = 20s, even though the latter is "slower" |
+| Template Count per Index Group | table | `cardinality(query_template_hash)` by `index_group` | Query complexity by index — if `products` jumps from 12 to 25 templates, someone is generating dynamic queries |
 
 ---
 
@@ -133,11 +160,11 @@ These are not yet broken into testable deliverables. Scope when the above are do
 
 ```
 D1 (Parsing Fixes) ✅
-D2 (Heat Scoring) ─── standalone, can start now
-D3 (Templates) ─────── standalone, can start now
+D2 (Heat Scoring) ✅
+D3 (Templates) ✅
 D4 (Clients) ────────── standalone, can start now
 
-D5 (Mapping Diff) ──── after D1-D2 for accurate data
+D5 (Mapping Diff) ──── after D1-D2 ✅ — ready to start
 D6 (Recommendations) ─ after D5
 D7 (Painless) ───────── standalone, can start now
 

@@ -1,8 +1,8 @@
-"""Tests for gateway.events — fingerprinting and event building."""
+"""Tests for gateway.events — fingerprinting, templating, and event building."""
 
 from unittest.mock import patch
 
-from gateway.events import _compute_fingerprint, build_event, get_event_sample_config, set_event_sample_config, should_sample_event, get_query_body_config, set_query_body_config
+from gateway.events import _compute_fingerprint, _templatize, _compute_template, build_event, get_event_sample_config, set_event_sample_config, should_sample_event, get_query_body_config, set_query_body_config
 from gateway.extractor import FieldRefs
 import gateway.events as events_mod
 
@@ -318,3 +318,167 @@ class TestEventSampleConfig:
         """random() == sample_rate should be excluded (strict < comparison)."""
         set_event_sample_config(sample_rate=0.5)
         assert should_sample_event() is False
+
+
+class TestTemplatize:
+    def test_scalar_string(self):
+        assert _templatize("hello") == "?"
+
+    def test_scalar_number(self):
+        assert _templatize(42) == "?"
+
+    def test_scalar_bool(self):
+        assert _templatize(True) == "?"
+
+    def test_scalar_none(self):
+        assert _templatize(None) == "?"
+
+    def test_simple_dict(self):
+        assert _templatize({"match": {"title": "laptop"}}) == {"match": {"title": "?"}}
+
+    def test_nested_dict(self):
+        obj = {"range": {"price": {"gte": 100, "lte": 500}}}
+        assert _templatize(obj) == {"range": {"price": {"gte": "?", "lte": "?"}}}
+
+    def test_list_of_scalars_collapses(self):
+        obj = {"terms": {"tags": ["electronics", "laptop", "gaming"]}}
+        assert _templatize(obj) == {"terms": {"tags": ["?"]}}
+
+    def test_list_of_scalars_different_lengths_same_template(self):
+        assert _templatize(["a", "b"]) == ["?"]
+        assert _templatize(["a", "b", "c", "d"]) == ["?"]
+
+    def test_list_of_dicts_preserves_structure(self):
+        obj = {"bool": {"must": [
+            {"term": {"status": "active"}},
+            {"range": {"date": {"gte": "2024-01-01"}}},
+        ]}}
+        expected = {"bool": {"must": [
+            {"term": {"status": "?"}},
+            {"range": {"date": {"gte": "?"}}},
+        ]}}
+        assert _templatize(obj) == expected
+
+    def test_empty_list_stays_empty(self):
+        assert _templatize({"tags": []}) == {"tags": []}
+
+    def test_empty_dict_stays_empty(self):
+        assert _templatize({}) == {}
+
+    def test_real_world_search_query(self):
+        """A realistic Kibana-style search query."""
+        query = {
+            "query": {
+                "bool": {
+                    "must": [{"match": {"title": "laptop"}}],
+                    "filter": [{"range": {"timestamp": {"gte": "now-24h"}}}],
+                }
+            },
+            "size": 10,
+            "sort": [{"timestamp": {"order": "desc"}}],
+            "aggs": {
+                "by_category": {"terms": {"field": "category", "size": 20}}
+            },
+        }
+        result = _templatize(query)
+        assert result["size"] == "?"
+        assert result["query"]["bool"]["must"][0] == {"match": {"title": "?"}}
+        assert result["query"]["bool"]["filter"][0] == {"range": {"timestamp": {"gte": "?"}}}
+        assert result["sort"][0] == {"timestamp": {"order": "?"}}
+        assert result["aggs"]["by_category"] == {"terms": {"field": "?", "size": "?"}}
+
+
+class TestComputeTemplate:
+    def test_same_structure_different_values_same_hash(self):
+        body_a = b'{"match": {"title": "laptop"}}'
+        body_b = b'{"match": {"title": "phone"}}'
+        hash_a, _ = _compute_template(body_a)
+        hash_b, _ = _compute_template(body_b)
+        assert hash_a == hash_b
+        assert hash_a is not None
+
+    def test_different_structure_different_hash(self):
+        body_a = b'{"match": {"title": "laptop"}}'
+        body_b = b'{"term": {"category": "electronics"}}'
+        hash_a, _ = _compute_template(body_a)
+        hash_b, _ = _compute_template(body_b)
+        assert hash_a != hash_b
+
+    def test_key_order_irrelevant(self):
+        body_a = b'{"a": 1, "b": 2}'
+        body_b = b'{"b": 2, "a": 1}'
+        hash_a, _ = _compute_template(body_a)
+        hash_b, _ = _compute_template(body_b)
+        assert hash_a == hash_b
+
+    def test_list_values_collapse(self):
+        body_a = b'{"terms": {"tags": ["a", "b", "c"]}}'
+        body_b = b'{"terms": {"tags": ["x", "y"]}}'
+        hash_a, _ = _compute_template(body_a)
+        hash_b, _ = _compute_template(body_b)
+        assert hash_a == hash_b
+
+    def test_returns_hex_string(self):
+        hash_val, _ = _compute_template(b'{"query": {"match_all": {}}}')
+        assert hash_val is not None
+        assert len(hash_val) == 64
+        assert all(c in "0123456789abcdef" for c in hash_val)
+
+    def test_text_contains_placeholders(self):
+        _, text = _compute_template(b'{"match": {"title": "laptop"}}')
+        assert text is not None
+        assert '"?"' in text
+        assert "laptop" not in text
+
+    def test_text_readable_format(self):
+        """Template text should use spaces for readability."""
+        _, text = _compute_template(b'{"a": 1}')
+        assert ": " in text  # separator with space
+
+    def test_empty_body_returns_none(self):
+        h, t = _compute_template(b"")
+        assert h is None
+        assert t is None
+
+    def test_invalid_json_returns_none(self):
+        h, t = _compute_template(b"not json")
+        assert h is None
+        assert t is None
+
+
+class TestBuildEventTemplateFields:
+    def test_template_fields_populated(self):
+        refs = FieldRefs(queried={"title"})
+        body = b'{"query": {"match": {"title": "laptop"}}}'
+        event = build_event(
+            index_name="products", operation="search", field_refs=refs,
+            method="POST", path="/products/_search", response_status=200,
+            elapsed_ms=42.0, body=body,
+        )
+        assert event["query_template_hash"] is not None
+        assert len(event["query_template_hash"]) == 64
+        assert event["query_template_text"] is not None
+        assert '"?"' in event["query_template_text"]
+
+    def test_template_fields_none_without_body(self):
+        refs = FieldRefs()
+        event = build_event(
+            index_name="x", operation="search", field_refs=refs,
+            method="GET", path="/x/_search", response_status=200, elapsed_ms=0,
+        )
+        assert event["query_template_hash"] is None
+        assert event["query_template_text"] is None
+
+    def test_same_template_for_different_values(self):
+        refs = FieldRefs(queried={"title"})
+        event_a = build_event(
+            index_name="x", operation="search", field_refs=refs,
+            method="POST", path="/x/_search", response_status=200,
+            elapsed_ms=10, body=b'{"match": {"title": "laptop"}}',
+        )
+        event_b = build_event(
+            index_name="x", operation="search", field_refs=refs,
+            method="POST", path="/x/_search", response_status=200,
+            elapsed_ms=10, body=b'{"match": {"title": "phone"}}',
+        )
+        assert event_a["query_template_hash"] == event_b["query_template_hash"]

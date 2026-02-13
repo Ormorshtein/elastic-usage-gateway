@@ -147,9 +147,62 @@ def _compute_index_heat(bucket: dict, time_window_hours: float) -> dict:
     }
 
 
-# Field sub-aggregations shared by both query structures
+def _compute_index_heat_weighted(bucket: dict, time_window_hours: float) -> dict:
+    """Compute response-time-weighted field heat for a single concrete index bucket.
+
+    Same structure as _compute_index_heat, but instead of counting how many
+    events reference each field, it sums the response_time_ms of those events.
+    A field involved in slow queries ranks higher than one involved in many
+    fast queries.
+
+    Expected bucket structure: same as _compute_index_heat, but each field
+    bucket also contains:
+        {"total_response_time": {"value": 12345.6}}
+    """
+    field_times: dict[str, dict[str, float]] = defaultdict(lambda: {
+        cat: 0.0 for cat in FIELD_CATEGORIES
+    })
+    total_time_all_fields = 0.0
+
+    for category in FIELD_CATEGORIES:
+        agg_key = f"field_{category}"
+        for fb in bucket.get(agg_key, {}).get("buckets", []):
+            field_name = fb["key"]
+            resp_time = fb.get("total_response_time", {}).get("value", 0.0)
+            field_times[field_name][category] = resp_time
+            total_time_all_fields += resp_time
+
+    fields_report = {}
+    field_recommendations = []
+    for field_name, cats in sorted(field_times.items()):
+        field_total_time = sum(cats.values())
+        proportion = field_total_time / max(total_time_all_fields, 0.001)
+        field_t = _field_tier(proportion)
+        fields_report[field_name] = {
+            "heat": round(proportion, 4),
+            "tier": field_t,
+            "total_time_ms": round(field_total_time, 1),
+            **{k: round(v, 1) for k, v in cats.items()},
+        }
+        rec = _recommend_field(field_name, field_t, cats)
+        if rec:
+            field_recommendations.append(rec)
+
+    return {
+        "total_response_time_ms": round(total_time_all_fields, 1),
+        "fields": fields_report,
+        "recommendations": field_recommendations,
+    }
+
+
+# Field sub-aggregations shared by both query structures.
+# Each field terms bucket includes a sum of response_time_ms so we can compute
+# both count-based and time-weighted field heat from the same query.
 _FIELD_SUB_AGGS = {
-    f"field_{cat}": {"terms": {"field": f"fields.{cat}", "size": 500}}
+    f"field_{cat}": {
+        "terms": {"field": f"fields.{cat}", "size": 500},
+        "aggs": {"total_response_time": {"sum": {"field": "response_time_ms"}}},
+    }
     for cat in FIELD_CATEGORIES
 }
 
@@ -227,6 +280,10 @@ async def compute_heat(time_window_hours: float = 24.0,
         for index_bucket in group_bucket.get("by_index", {}).get("buckets", []):
             index_name = index_bucket["key"]
             index_report = _compute_index_heat(index_bucket, time_window_hours)
+            weighted_report = _compute_index_heat_weighted(index_bucket, time_window_hours)
+            index_report["fields_by_response_time"] = weighted_report["fields"]
+            index_report["response_time_recommendations"] = weighted_report["recommendations"]
+            index_report["total_response_time_ms"] = weighted_report["total_response_time_ms"]
             indices[index_name] = index_report
             # Bubble up field recommendations from concrete indices
             group_recommendations.extend(index_report.get("recommendations", []))
@@ -258,11 +315,125 @@ async def compute_heat(time_window_hours: float = 24.0,
 
     return {
         "time_window": f"last_{int(time_window_hours)}h",
+        "scoring": {
+            "fields": {
+                "method": "count",
+                "description": (
+                    "Field heat based on reference count. "
+                    "heat = field references / total field references in the index. "
+                    "Shows which fields are queried most often."
+                ),
+            },
+            "fields_by_response_time": {
+                "method": "response_time_weighted",
+                "description": (
+                    "Field heat based on total response time. "
+                    "heat = sum(response_time_ms for events referencing field) / "
+                    "total response_time_ms across all field references. "
+                    "Fields involved in slow queries rank higher — "
+                    "optimizing these saves the most cluster time."
+                ),
+            },
+        },
         "summary": {
             "total_groups": len(groups),
             "by_tier": summary_by_tier,
         },
         "groups": groups,
+    }
+
+
+async def compute_query_patterns(
+    time_window_hours: float = 24.0,
+    index_group: str | None = None,
+) -> dict:
+    """Query pattern report grouped by structural template.
+
+    Groups events by query_template_hash and returns execution count,
+    response time stats, and a sample template text for each pattern.
+    """
+    must_clauses: list[dict] = [
+        {"range": {"timestamp": {"gte": f"now-{int(time_window_hours)}h"}}},
+        {"exists": {"field": "query_template_hash"}},
+    ]
+    if index_group:
+        must_clauses.append({"term": {"index_group": index_group}})
+
+    query = {
+        "size": 0,
+        "query": {"bool": {"must": must_clauses}},
+        "aggs": {
+            "by_template": {
+                "terms": {
+                    "field": "query_template_hash",
+                    "size": 100,
+                    "order": {"_count": "desc"},
+                },
+                "aggs": {
+                    "total_response_time": {"sum": {"field": "response_time_ms"}},
+                    "avg_response_time": {"avg": {"field": "response_time_ms"}},
+                    "index_groups": {"terms": {"field": "index_group", "size": 20}},
+                    "sample": {
+                        "top_hits": {
+                            "size": 1,
+                            "_source": ["query_template_text", "operation"],
+                        }
+                    },
+                },
+            },
+        },
+    }
+
+    try:
+        resp = await _client.post(f"/{USAGE_INDEX}/_search", json=query)
+        if resp.status_code != 200:
+            logger.error("Query patterns query failed: %s %s", resp.status_code, resp.text[:300])
+            return {"error": "Failed to query usage events", "status": resp.status_code}
+        data = resp.json()
+    except httpx.RequestError as exc:
+        logger.error("Query patterns request failed: %s", exc)
+        return {"error": str(exc)}
+
+    patterns = []
+    total_executions = 0
+    total_response_time = 0.0
+
+    for bucket in data.get("aggregations", {}).get("by_template", {}).get("buckets", []):
+        exec_count = bucket["doc_count"]
+        total_time = bucket["total_response_time"]["value"]
+        avg_time = bucket["avg_response_time"]["value"]
+
+        groups = [g["key"] for g in bucket.get("index_groups", {}).get("buckets", [])]
+
+        sample_hits = bucket.get("sample", {}).get("hits", {}).get("hits", [])
+        template_text = None
+        operation = None
+        if sample_hits:
+            src = sample_hits[0].get("_source", {})
+            template_text = src.get("query_template_text")
+            operation = src.get("operation")
+
+        patterns.append({
+            "template_hash": bucket["key"],
+            "template_text": template_text,
+            "execution_count": exec_count,
+            "total_response_time_ms": round(total_time, 1),
+            "avg_response_time_ms": round(avg_time, 1),
+            "index_groups": groups,
+            "operation": operation,
+        })
+
+        total_executions += exec_count
+        total_response_time += total_time
+
+    return {
+        "time_window": f"last_{int(time_window_hours)}h",
+        "summary": {
+            "unique_templates": len(patterns),
+            "total_executions": total_executions,
+            "total_response_time_ms": round(total_response_time, 1),
+        },
+        "patterns": patterns,
     }
 
 

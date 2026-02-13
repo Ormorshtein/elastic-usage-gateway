@@ -106,6 +106,34 @@ def _vis(vis_id, title, vis_type, vis_state_params, aggs, index_pattern_id,
     }
 
 
+def _markdown(md_id, title, markdown_text):
+    """Build a Markdown visualization panel (used as section headers)."""
+    return {
+        "id": md_id,
+        "type": "visualization",
+        "attributes": {
+            "title": title,
+            "visState": json.dumps({
+                "title": title,
+                "type": "markdown",
+                "params": {
+                    "fontSize": 16,
+                    "openLinksInNewTab": True,
+                    "markdown": markdown_text,
+                },
+                "aggs": [],
+            }),
+            "kibanaSavedObjectMeta": {
+                "searchSourceJSON": json.dumps({
+                    "query": {"query": "", "language": "kuery"},
+                    "filter": [],
+                })
+            },
+        },
+        "references": [],
+    }
+
+
 # --- Shared params ---
 
 TABLE_PARAMS = {
@@ -276,6 +304,167 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
             usage_dv_id,
             search_query=_RAW_EVENTS_ONLY,
         ))
+
+    # =========================================================
+    # FIELD HEAT BY RESPONSE TIME (time-weighted field importance)
+    # =========================================================
+    # Same field categories as above, but metric is sum(response_time_ms)
+    # instead of count. Shows which fields cause the most total latency.
+
+    for field_cat, label in [
+        ("fields.queried", "Queried Fields by Response Time"),
+        ("fields.filtered", "Filtered Fields by Response Time"),
+        ("fields.aggregated", "Aggregated Fields by Response Time"),
+        ("fields.sorted", "Sorted Fields by Response Time"),
+        ("fields.sourced", "Fetched Fields by Response Time"),
+    ]:
+        vis_id = "vis-rt-" + field_cat.split(".")[-1]
+        objects.append(_vis(
+            vis_id, label, "table",
+            {**TABLE_PARAMS, "totalFunc": "sum", "percentageCol": "Sum of response_time_ms"},
+            [
+                {"id": "1", "enabled": True, "type": "sum",
+                 "params": {"field": "response_time_ms"},
+                 "schema": "metric"},
+                {"id": "2", "enabled": True, "type": "terms",
+                 "params": {"field": field_cat, "size": 20,
+                            "order": "desc", "orderBy": "1"},
+                 "schema": "bucket"},
+            ],
+            usage_dv_id,
+            search_query=_RAW_EVENTS_ONLY,
+        ))
+
+    # =========================================================
+    # SECTION HEADERS (Markdown panels for dashboard organization)
+    # =========================================================
+
+    objects.append(_markdown(
+        "md-header-overview", "Section: Overview",
+        "## Overview\nTraffic volume, index groups, and query type breakdown.",
+    ))
+    objects.append(_markdown(
+        "md-header-field-heat-count", "Section: Field Heat by Count",
+        "## Field Heat by Count\nWhich fields are used most often, by operation type.",
+    ))
+    objects.append(_markdown(
+        "md-header-field-heat-time", "Section: Field Heat by Response Time",
+        "## Field Heat by Response Time\nWhich fields cause the most total latency. Optimizing these saves the most cluster time.",
+    ))
+    objects.append(_markdown(
+        "md-header-query-patterns", "Section: Query Patterns",
+        "## Query Patterns\nStructural query templates grouped by shape (leaf values replaced with `?`). "
+        "Shows which query patterns dominate traffic and cost. "
+        "Use the `/_gateway/query-patterns` API for full template text.",
+    ))
+    objects.append(_markdown(
+        "md-header-lookback", "Section: Lookback Analysis",
+        "## Lookback Analysis\nHow far back queries look in time — useful for ILM tiering decisions.",
+    ))
+    objects.append(_markdown(
+        "md-header-raw-events", "Section: Raw Events",
+        "## Raw Events\nIndividual query-level event log for debugging and inspection.",
+    ))
+
+    # =========================================================
+    # QUERY PATTERN VISUALIZATIONS
+    # =========================================================
+
+    # Top Query Templates — table showing most-executed structural patterns
+    objects.append(_vis(
+        "vis-top-templates", "Top Query Templates (by execution count)", "table",
+        {**TABLE_PARAMS, "percentageCol": "Count"},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "avg",
+             "params": {"field": "response_time_ms"}, "schema": "metric"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "query_template_hash", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Query Templates Over Time — stacked area showing pattern drift
+    objects.append(_vis(
+        "vis-templates-over-time", "Query Templates Over Time", "area",
+        {"type": "area", "grid": {"categoryLines": False}, **AREA_AXES,
+         "seriesParams": [{"show": True, "type": "area", "mode": "stacked",
+                           "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Count", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2,
+                           "showCircles": True, "interpolate": "linear"}],
+         "addTooltip": True, "addLegend": True, "legendPosition": "right",
+         "times": [], "addTimeMarker": False,
+         "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "date_histogram",
+             "params": {"field": "timestamp", "useNormalizedEsInterval": True,
+                        "scaleMetricValues": False, "interval": "auto",
+                        "drop_partials": False, "min_doc_count": 1,
+                        "extended_bounds": {}},
+             "schema": "segment"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "query_template_hash", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "group"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Costliest Templates — horizontal bar ranked by total cluster time consumed
+    TEMPLATE_COST_AXES = {
+        "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "left",
+                          "show": True, "style": {}, "scale": {"type": "linear"},
+                          "labels": {"show": True, "filter": True, "truncate": 12}, "title": {}}],
+        "valueAxes": [{"id": "ValueAxis-1", "name": "BottomAxis-1", "type": "value",
+                       "position": "bottom", "show": True, "style": {},
+                       "scale": {"type": "linear", "mode": "normal"},
+                       "labels": {"show": True, "rotate": 0, "filter": False, "truncate": 100},
+                       "title": {"text": "Total Response Time (ms)"}}],
+    }
+    objects.append(_vis(
+        "vis-costliest-templates", "Costliest Query Templates (by total cluster time)", "horizontal_bar",
+        {"type": "horizontal_bar", "grid": {"categoryLines": False}, **TEMPLATE_COST_AXES,
+         "seriesParams": [{"show": True, "type": "histogram", "mode": "normal",
+                           "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Total response_time_ms", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2,
+                           "showCircles": True}],
+         "addTooltip": True, "addLegend": False,
+         "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "sum",
+             "params": {"field": "response_time_ms"}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "query_template_hash", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
+
+    # Template Count per Index Group — how many distinct patterns per group
+    objects.append(_vis(
+        "vis-templates-by-group", "Unique Templates per Index Group", "table",
+        TABLE_PARAMS,
+        [
+            {"id": "1", "enabled": True, "type": "cardinality",
+             "params": {"field": "query_template_hash"}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "index_group", "size": 20,
+                        "order": "desc", "orderBy": "2"},
+             "schema": "bucket"},
+        ],
+        usage_dv_id,
+        search_query=_RAW_EVENTS_ONLY,
+    ))
 
     # =========================================================
     # LOOKBACK VISUALIZATIONS (query time-range window analysis)
@@ -534,41 +723,93 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     })
 
     # Usage & Heat dashboard (with native index_group control at top)
+    #
+    # Layout rows (each section preceded by a 5-unit Markdown header):
+    #   y=0:   [header] Overview
+    #   y=5:   index groups, ops over time, query types
+    #   y=17:  [header] Field Heat by Count
+    #   y=22:  top queried/filtered/aggregated
+    #   y=36:  top sorted/sourced + avg response time
+    #   y=48:  [header] Field Heat by Response Time
+    #   y=53:  queried/filtered/aggregated (time-weighted)
+    #   y=67:  sorted/sourced (time-weighted)
+    #   y=79:  [header] Query Patterns
+    #   y=84:  top templates, templates over time
+    #   y=98:  costliest templates, templates by group
+    #   y=110: [header] Lookback Analysis
+    #   y=115: lookback distribution, lookback fields
+    #   y=129: [header] Raw Events
+    #   y=134: raw events table
     control_input, control_refs = _control_group_input(usage_dv_id)
     usage_panels = [
-        panel_ref(0,  "vis-concrete-indices",       0,  0, 18, 12),   # concrete indices table
-        panel_ref(1,  "vis-ops-over-time",         18,  0, 18, 12),   # ops over time
-        panel_ref(2,  "vis-query-types",           36,  0, 12, 12),   # query type pie
-        panel_ref(3,  "vis-top-queried",            0, 12, 16, 14),
-        panel_ref(4,  "vis-top-filtered",          16, 12, 16, 14),
-        panel_ref(5,  "vis-top-aggregated",        32, 12, 16, 14),
-        panel_ref(6,  "vis-top-sorted",             0, 26, 16, 12),
-        panel_ref(7,  "vis-top-sourced",           16, 26, 16, 12),
-        panel_ref(8,  "vis-response-time",         32, 26, 16, 12),
-        panel_ref(9,  "vis-lookback-distribution",  0, 38, 24, 14),   # lookback histogram
-        panel_ref(10, "vis-lookback-fields",       24, 38, 24, 14),   # lookback date fields pie
-        # Raw events table (saved search — type "search" not "visualization")
+        # --- Section: Overview ---
+        panel_ref(0,  "md-header-overview",          0,  0, 48,  5),
+        panel_ref(1,  "vis-concrete-indices",         0,  5, 18, 12),
+        panel_ref(2,  "vis-ops-over-time",           18,  5, 18, 12),
+        panel_ref(3,  "vis-query-types",             36,  5, 12, 12),
+        # --- Section: Field Heat by Count ---
+        panel_ref(4,  "md-header-field-heat-count",   0, 17, 48,  5),
+        panel_ref(5,  "vis-top-queried",              0, 22, 16, 14),
+        panel_ref(6,  "vis-top-filtered",            16, 22, 16, 14),
+        panel_ref(7,  "vis-top-aggregated",          32, 22, 16, 14),
+        panel_ref(8,  "vis-top-sorted",               0, 36, 16, 12),
+        panel_ref(9,  "vis-top-sourced",             16, 36, 16, 12),
+        panel_ref(10, "vis-response-time",           32, 36, 16, 12),
+        # --- Section: Field Heat by Response Time ---
+        panel_ref(11, "md-header-field-heat-time",    0, 48, 48,  5),
+        panel_ref(12, "vis-rt-queried",               0, 53, 16, 14),
+        panel_ref(13, "vis-rt-filtered",             16, 53, 16, 14),
+        panel_ref(14, "vis-rt-aggregated",           32, 53, 16, 14),
+        panel_ref(15, "vis-rt-sorted",                0, 67, 16, 12),
+        panel_ref(16, "vis-rt-sourced",              16, 67, 16, 12),
+        # --- Section: Query Patterns ---
+        panel_ref(17, "md-header-query-patterns",     0, 79, 48,  5),
+        panel_ref(18, "vis-top-templates",            0, 84, 24, 14),
+        panel_ref(19, "vis-templates-over-time",     24, 84, 24, 14),
+        panel_ref(20, "vis-costliest-templates",      0, 98, 24, 12),
+        panel_ref(21, "vis-templates-by-group",      24, 98, 24, 12),
+        # --- Section: Lookback Analysis ---
+        panel_ref(22, "md-header-lookback",           0, 110, 48,  5),
+        panel_ref(23, "vis-lookback-distribution",    0, 115, 24, 14),
+        panel_ref(24, "vis-lookback-fields",         24, 115, 24, 14),
+        # --- Section: Raw Events ---
+        panel_ref(25, "md-header-raw-events",         0, 129, 48,  5),
         {
-            "panelIndex": "11",
-            "gridData": {"x": 0, "y": 52, "w": 48, "h": 18, "i": "11"},
+            "panelIndex": "26",
+            "gridData": {"x": 0, "y": 134, "w": 48, "h": 18, "i": "26"},
             "version": "8.12.2",
             "type": "search",
-            "panelRefName": "panel_11",
+            "panelRefName": "panel_26",
         },
     ]
     usage_refs = [
-        {"name": "panel_0",  "type": "visualization", "id": "vis-concrete-indices"},
-        {"name": "panel_1",  "type": "visualization", "id": "vis-ops-over-time"},
-        {"name": "panel_2",  "type": "visualization", "id": "vis-query-types"},
-        {"name": "panel_3",  "type": "visualization", "id": "vis-top-queried"},
-        {"name": "panel_4",  "type": "visualization", "id": "vis-top-filtered"},
-        {"name": "panel_5",  "type": "visualization", "id": "vis-top-aggregated"},
-        {"name": "panel_6",  "type": "visualization", "id": "vis-top-sorted"},
-        {"name": "panel_7",  "type": "visualization", "id": "vis-top-sourced"},
-        {"name": "panel_8",  "type": "visualization", "id": "vis-response-time"},
-        {"name": "panel_9",  "type": "visualization", "id": "vis-lookback-distribution"},
-        {"name": "panel_10", "type": "visualization", "id": "vis-lookback-fields"},
-        {"name": "panel_11", "type": "search", "id": "search-usage-events"},
+        {"name": "panel_0",  "type": "visualization", "id": "md-header-overview"},
+        {"name": "panel_1",  "type": "visualization", "id": "vis-concrete-indices"},
+        {"name": "panel_2",  "type": "visualization", "id": "vis-ops-over-time"},
+        {"name": "panel_3",  "type": "visualization", "id": "vis-query-types"},
+        {"name": "panel_4",  "type": "visualization", "id": "md-header-field-heat-count"},
+        {"name": "panel_5",  "type": "visualization", "id": "vis-top-queried"},
+        {"name": "panel_6",  "type": "visualization", "id": "vis-top-filtered"},
+        {"name": "panel_7",  "type": "visualization", "id": "vis-top-aggregated"},
+        {"name": "panel_8",  "type": "visualization", "id": "vis-top-sorted"},
+        {"name": "panel_9",  "type": "visualization", "id": "vis-top-sourced"},
+        {"name": "panel_10", "type": "visualization", "id": "vis-response-time"},
+        {"name": "panel_11", "type": "visualization", "id": "md-header-field-heat-time"},
+        {"name": "panel_12", "type": "visualization", "id": "vis-rt-queried"},
+        {"name": "panel_13", "type": "visualization", "id": "vis-rt-filtered"},
+        {"name": "panel_14", "type": "visualization", "id": "vis-rt-aggregated"},
+        {"name": "panel_15", "type": "visualization", "id": "vis-rt-sorted"},
+        {"name": "panel_16", "type": "visualization", "id": "vis-rt-sourced"},
+        {"name": "panel_17", "type": "visualization", "id": "md-header-query-patterns"},
+        {"name": "panel_18", "type": "visualization", "id": "vis-top-templates"},
+        {"name": "panel_19", "type": "visualization", "id": "vis-templates-over-time"},
+        {"name": "panel_20", "type": "visualization", "id": "vis-costliest-templates"},
+        {"name": "panel_21", "type": "visualization", "id": "vis-templates-by-group"},
+        {"name": "panel_22", "type": "visualization", "id": "md-header-lookback"},
+        {"name": "panel_23", "type": "visualization", "id": "vis-lookback-distribution"},
+        {"name": "panel_24", "type": "visualization", "id": "vis-lookback-fields"},
+        {"name": "panel_25", "type": "visualization", "id": "md-header-raw-events"},
+        {"name": "panel_26", "type": "search", "id": "search-usage-events"},
     ] + control_refs
     objects.append({
         "id": "usage-heat",

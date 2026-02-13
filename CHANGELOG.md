@@ -4,6 +4,48 @@ Reverse-chronological record of significant changes, decisions, and lessons lear
 
 ---
 
+## 2026-02-13 — Deliverable 3: Query Template Clustering
+
+Added structural query pattern analysis. Instead of treating every unique query body as distinct, the gateway now extracts a **template** by replacing all leaf values with `"?"` and hashing the skeleton. Structurally identical queries (e.g., same bool/range/term shape with different values) collapse into one template. This reveals which query *shapes* dominate traffic and cost.
+
+**What changed:**
+- New `_templatize()` function replaces leaf values with `"?"`, collapses scalar arrays to `["?"]`, preserves dict/list structure
+- New event fields: `query_template_hash` (indexed keyword for grouping) and `query_template_text` (stored for display)
+- New endpoint: `GET /_gateway/query-patterns?hours=24&index_group=...` — returns templates ranked by execution count with response time stats
+- Template hash computation uses `sort_keys=True`, so key order is irrelevant (same as existing fingerprint)
+
+**Kibana dashboard reorganization:**
+- Added **Markdown section headers** throughout the Usage & Heat Dashboard — each section now has a title and one-line explanation (Overview, Field Heat by Count, Field Heat by Response Time, Query Patterns, Lookback Analysis, Raw Events)
+- Added 4 new query pattern panels: Top Query Templates table, Query Templates Over Time (stacked area for drift detection), Costliest Query Templates (horizontal bar by total cluster time), Unique Templates per Index Group
+
+**Files changed:** `gateway/events.py`, `gateway/analyzer.py`, `gateway/main.py`, `kibana_setup.py`, `tests/test_events.py`, `tests/test_analyzer.py`
+**Tests added:** 28 new (244 total)
+
+---
+
+## 2026-02-13 — Deliverable 2: Response-Time-Weighted Field Heat Scoring
+
+Added a second field scoring panel that weights field importance by total response time rather than reference count. A field involved in slow queries now ranks higher than one involved in many fast queries — matching how pganalyze, MongoDB Atlas, and AWS RDS Performance Insights prioritize optimization targets.
+
+**What changed:**
+- Heat report now includes `fields_by_response_time` alongside `fields` in each index
+- `fields` (count-based) is unchanged — full backward compatibility
+- `scoring` metadata block at top level explains both methods
+- `response_time_recommendations` provides time-weighted field recommendations
+- ES aggregation query adds `sum` sub-agg on `response_time_ms` inside field term buckets
+
+**No new data collection needed** — `response_time_ms` already existed in every usage event.
+
+**Kibana dashboards:**
+- Added 5 new time-weighted visualizations to the Usage & Heat Dashboard (one per field category: queried, filtered, aggregated, sorted, fetched)
+- Each uses `sum(response_time_ms)` as the metric instead of event count
+- Dashboard layout: count-based field tables at top, time-weighted tables below, then lookback and raw events
+
+**Files changed:** `gateway/analyzer.py`, `tests/test_analyzer.py`, `kibana_setup.py`
+**Tests added:** 7 new (217 total)
+
+---
+
 ## 2026-02-13 — Deliverable 1: Fix Parsing Blind Spots (Gaps 1-9)
 
 Closed all 9 MUST-HAVE parsing gaps identified in research.md. The extractor now covers the DSL features that real production traffic (especially Kibana) uses heavily.

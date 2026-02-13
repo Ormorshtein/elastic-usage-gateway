@@ -29,7 +29,7 @@ from config import GATEWAY_HOST, GATEWAY_PORT, GATEWAY_WORKERS, ES_HOST, USAGE_I
 from gateway.proxy import proxy_request, close_proxy_client
 from gateway.extractor import extract_from_request
 from gateway.events import build_event, emit_event, emit_event_background, ensure_usage_index, should_sample_event, get_event_sample_config, set_event_sample_config, get_query_body_config, set_query_body_config, close_event_client, start_bulk_writer
-from gateway.analyzer import compute_heat, close_analyzer_client
+from gateway.analyzer import compute_heat, compute_query_patterns, close_analyzer_client
 from gateway.ui import load_html
 from gateway import metadata as metadata_mod
 from gateway.metadata import close_metadata_client
@@ -168,6 +168,13 @@ async def update_config(request: Request):
 async def heat(hours: float = 24.0, index_group: str | None = None):
     """Compute and return the heat report, optionally filtered by index group."""
     report = await compute_heat(time_window_hours=hours, index_group=index_group)
+    return JSONResponse(content=report)
+
+
+@app.get("/_gateway/query-patterns")
+async def query_patterns(hours: float = 24.0, index_group: str | None = None):
+    """Query pattern report grouped by structural template."""
+    report = await compute_query_patterns(time_window_hours=hours, index_group=index_group)
     return JSONResponse(content=report)
 
 

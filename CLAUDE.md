@@ -64,6 +64,15 @@ Types: `feat`, `fix`, `refactor`, `docs`, `chore`
 - Docker volumes / ES data
 - IDE config (`.vscode/`, `.idea/`)
 
+## Kibana Dashboards
+
+Dashboards are the primary way users consume this tool's output. They should be **self-explanatory** — a new team member opening the dashboard for the first time should understand what they're looking at without reading docs or asking someone.
+
+- Use **Markdown visualization panels** as section headers to break the dashboard into logical groups. Each section header should include a short explanation of what the section shows and why it matters.
+- Panel titles should be descriptive enough to stand alone (e.g., "Costliest Query Templates (by total cluster time)" not "Templates").
+- When a panel's meaning isn't obvious from the title, add a description in the saved object's `description` field.
+- Prefer tables and bar charts over abstract visualizations — the audience is engineers making decisions, not executives watching a wall screen.
+
 ## Keeping Docs in Sync
 
 After completing work, update docs to stay in sync:

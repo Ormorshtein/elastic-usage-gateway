@@ -1,6 +1,9 @@
-"""Tests for gateway.analyzer — tier classification, recommendations, and heat computation."""
+"""Tests for gateway.analyzer — tier classification, recommendations, heat computation, and query patterns."""
 
-from gateway.analyzer import _index_tier, _field_tier, _recommend_index, _recommend_field, _compute_index_heat
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from gateway.analyzer import _index_tier, _field_tier, _recommend_index, _recommend_field, _compute_index_heat, _compute_index_heat_weighted, compute_query_patterns
 
 
 class TestIndexTier:
@@ -159,3 +162,172 @@ class TestComputeIndexHeat:
         # description: 10/100 = 0.1 → warm
         assert result["fields"]["title"]["tier"] == "hot"
         assert result["fields"]["description"]["tier"] == "warm"
+
+
+class TestComputeIndexHeatWeighted:
+    """_compute_index_heat_weighted scores fields by total response_time_ms."""
+
+    def _make_bucket(self, field_buckets_by_category: dict) -> dict:
+        """Build a bucket with total_response_time sub-aggs per field."""
+        bucket = {"doc_count": 100}
+        for cat in ("queried", "filtered", "aggregated", "sorted", "sourced", "written"):
+            raw = field_buckets_by_category.get(cat, [])
+            bucket[f"field_{cat}"] = {"buckets": [
+                {"key": name, "doc_count": count, "total_response_time": {"value": time_ms}}
+                for name, count, time_ms in raw
+            ]}
+        return bucket
+
+    def test_slow_field_ranks_higher_than_fast_field(self):
+        """A field with high total response time outranks one with high count."""
+        bucket = self._make_bucket({
+            "queried": [
+                ("slow_field", 10, 5000.0),   # 10 queries, 5000ms total
+                ("fast_field", 1000, 1000.0),  # 1000 queries, 1000ms total
+            ],
+        })
+        result = _compute_index_heat_weighted(bucket, time_window_hours=24.0)
+        assert result["fields"]["slow_field"]["heat"] > result["fields"]["fast_field"]["heat"]
+        # slow_field: 5000/6000 ≈ 0.833 → hot
+        assert result["fields"]["slow_field"]["tier"] == "hot"
+
+    def test_proportions_sum_to_one(self):
+        bucket = self._make_bucket({
+            "queried": [("a", 50, 300.0), ("b", 50, 200.0)],
+            "filtered": [("c", 30, 500.0)],
+        })
+        result = _compute_index_heat_weighted(bucket, time_window_hours=24.0)
+        total_heat = sum(f["heat"] for f in result["fields"].values())
+        assert abs(total_heat - 1.0) < 0.01
+
+    def test_empty_buckets(self):
+        bucket = self._make_bucket({})
+        result = _compute_index_heat_weighted(bucket, time_window_hours=24.0)
+        assert result["fields"] == {}
+        assert result["total_response_time_ms"] == 0.0
+
+    def test_total_response_time_reported(self):
+        bucket = self._make_bucket({
+            "queried": [("title", 100, 4200.0)],
+            "sorted": [("price", 30, 800.0)],
+        })
+        result = _compute_index_heat_weighted(bucket, time_window_hours=24.0)
+        assert result["total_response_time_ms"] == 5000.0
+
+    def test_multi_category_field_sums_time(self):
+        """A field in multiple categories sums response time across all."""
+        bucket = self._make_bucket({
+            "queried": [("title", 80, 2000.0)],
+            "sourced": [("title", 80, 1500.0)],
+        })
+        result = _compute_index_heat_weighted(bucket, time_window_hours=24.0)
+        assert result["fields"]["title"]["heat"] == 1.0
+        assert result["fields"]["title"]["total_time_ms"] == 3500.0
+
+    def test_recommendations_generated(self):
+        """Weighted panel generates recommendations like the count-based one."""
+        bucket = self._make_bucket({
+            "sourced": [("display_only", 100, 5000.0)],
+        })
+        result = _compute_index_heat_weighted(bucket, time_window_hours=24.0)
+        # display_only is only sourced, never queried → should recommend index: false
+        assert any("index: false" in r for r in result["recommendations"])
+
+    def test_zero_response_time_no_crash(self):
+        bucket = self._make_bucket({
+            "queried": [("field_a", 50, 0.0)],
+        })
+        result = _compute_index_heat_weighted(bucket, time_window_hours=24.0)
+        assert result["fields"]["field_a"]["heat"] == 0.0
+
+
+class TestComputeQueryPatterns:
+    """compute_query_patterns aggregates events by structural template."""
+
+    def _mock_es_response(self, buckets):
+        """Build a mock httpx response wrapping template aggregation buckets."""
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.json.return_value = {
+            "aggregations": {"by_template": {"buckets": buckets}}
+        }
+        return mock
+
+    @pytest.mark.asyncio
+    async def test_parses_template_buckets(self):
+        buckets = [
+            {
+                "key": "abc123",
+                "doc_count": 150,
+                "total_response_time": {"value": 7500.0},
+                "avg_response_time": {"value": 50.0},
+                "index_groups": {"buckets": [{"key": "products"}, {"key": "logs"}]},
+                "sample": {"hits": {"hits": [
+                    {"_source": {"query_template_text": '{"match": {"title": "?"}}', "operation": "search"}}
+                ]}},
+            },
+            {
+                "key": "def456",
+                "doc_count": 80,
+                "total_response_time": {"value": 2400.0},
+                "avg_response_time": {"value": 30.0},
+                "index_groups": {"buckets": [{"key": "orders"}]},
+                "sample": {"hits": {"hits": []}},
+            },
+        ]
+        mock_resp = self._mock_es_response(buckets)
+
+        with patch("gateway.analyzer._client") as mock_client:
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            result = await compute_query_patterns(time_window_hours=24.0)
+
+        assert result["time_window"] == "last_24h"
+        assert result["summary"]["unique_templates"] == 2
+        assert result["summary"]["total_executions"] == 230
+        assert result["summary"]["total_response_time_ms"] == 9900.0
+
+        p = result["patterns"]
+        assert len(p) == 2
+        assert p[0]["template_hash"] == "abc123"
+        assert p[0]["execution_count"] == 150
+        assert p[0]["avg_response_time_ms"] == 50.0
+        assert p[0]["index_groups"] == ["products", "logs"]
+        assert p[0]["template_text"] == '{"match": {"title": "?"}}'
+        assert p[0]["operation"] == "search"
+
+        assert p[1]["template_hash"] == "def456"
+        assert p[1]["template_text"] is None
+        assert p[1]["operation"] is None
+
+    @pytest.mark.asyncio
+    async def test_index_group_filter_in_query(self):
+        """Verify index_group filter is included in the ES query."""
+        mock_resp = self._mock_es_response([])
+        captured_query = None
+
+        async def capture_post(url, json=None, **kwargs):
+            nonlocal captured_query
+            captured_query = json
+            return mock_resp
+
+        with patch("gateway.analyzer._client") as mock_client:
+            mock_client.post = AsyncMock(side_effect=capture_post)
+            await compute_query_patterns(time_window_hours=12.0, index_group="products")
+
+        assert captured_query is not None
+        must = captured_query["query"]["bool"]["must"]
+        assert any(c.get("term", {}).get("index_group") == "products" for c in must)
+        assert any("range" in c for c in must)
+        assert any("exists" in c for c in must)
+
+    @pytest.mark.asyncio
+    async def test_empty_result(self):
+        mock_resp = self._mock_es_response([])
+
+        with patch("gateway.analyzer._client") as mock_client:
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            result = await compute_query_patterns()
+
+        assert result["summary"]["unique_templates"] == 0
+        assert result["summary"]["total_executions"] == 0
+        assert result["patterns"] == []
