@@ -136,15 +136,17 @@ New panels in the "Query Patterns" section:
 ---
 
 ## Deliverable 7: Painless Script Extraction + Dependents
-**Status: [ ] NOT STARTED**
+**Status: [x] DONE (2026-02-14)**
 
-**Value:** Scripts are a blind spot — `script_fields`, scripted sorts, `function_score`, `runtime_mappings` all access fields via Painless that the gateway ignores. Rounds out extraction coverage.
+**Value:** Scripts were a blind spot — `script_fields`, scripted sorts, `function_score`, `runtime_mappings`, and pipeline aggs all access fields via Painless that the gateway was ignoring. Without this, fields used only in scripts appeared as "unused" and could receive false `remove_field` recommendations.
 
 **Scope:**
-- Painless regex extraction (`doc['field']`, `ctx._source.field`) (~20 lines)
-- Wire into `script_fields`, `runtime_mappings`, `function_score`
+- New `_extract_script_fields()` helper — regex extraction of `doc['field']`, `doc["field"]`, `ctx._source.field`
+- Language-aware: checks `lang` field (default Painless), skips Mustache and stored scripts
+- Wired into 5 DSL locations: `script_fields` → sourced, `runtime_mappings` → sourced, `function_score` (script_score + field_value_factor + decay) → queried, scripted sort → sorted, pipeline/scripted aggs → aggregated
 
-**Files:** `gateway/extractor.py`, tests
+**Files changed:** `gateway/extractor.py`, `tests/test_extractor.py`
+**Tests added:** 27 new (331 total)
 
 ---
 
@@ -199,7 +201,7 @@ D4 (Clients) ────────── standalone, can start now
 
 D5 (Mapping Diff) ✅
 D6 (Recommendations) ✅
-D7 (Painless) ───────── standalone, can start now
+D7 (Painless) ✅
 D8 (Index Arch Recs) ── needs _stats polling (new) + lookback data (D1-D3)
 
 CI/CD Validation ───── after D3 + D4 + D5

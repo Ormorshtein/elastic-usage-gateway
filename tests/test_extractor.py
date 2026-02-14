@@ -781,3 +781,303 @@ class TestFilterAggQueries:
         refs = extract_fields_from_search(body)
         assert refs.filtered == {"status", "created_at"}
         assert refs.aggregated == {"category"}
+
+
+# --- Deliverable 7: Painless script extraction ---
+
+class TestScriptFields:
+    """script_fields — computed columns via Painless scripts."""
+
+    def test_single_quote_doc_access(self):
+        body = {"script_fields": {
+            "total": {"script": {"source": "doc['price'].value * doc['quantity'].value"}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"price", "quantity"}
+
+    def test_double_quote_doc_access(self):
+        body = {"script_fields": {
+            "total": {"script": {"source": 'doc["price"].value * doc["quantity"].value'}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"price", "quantity"}
+
+    def test_short_form_string_script(self):
+        body = {"script_fields": {
+            "margin": {"script": "doc['revenue'].value - doc['cost'].value"},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"revenue", "cost"}
+
+    def test_ctx_source_access(self):
+        body = {"script_fields": {
+            "full_name": {"script": {"source": "ctx._source.first_name + ' ' + ctx._source.last_name"}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"first_name", "last_name"}
+
+    def test_mustache_script_skipped(self):
+        body = {"script_fields": {
+            "computed": {"script": {"lang": "mustache", "source": "{{field}}"}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == set()
+
+    def test_explicit_painless_lang(self):
+        body = {"script_fields": {
+            "val": {"script": {"lang": "painless", "source": "doc['price'].value"}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"price"}
+
+    def test_combined_with_regular_source(self):
+        body = {
+            "_source": ["title"],
+            "script_fields": {
+                "margin": {"script": {"source": "doc['price'].value * 0.1"}},
+            },
+        }
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"title", "price"}
+
+
+class TestRuntimeMappings:
+    """runtime_mappings — virtual fields defined at query time."""
+
+    def test_basic_runtime_mapping(self):
+        body = {"runtime_mappings": {
+            "day_of_week": {
+                "type": "keyword",
+                "script": {"source": "emit(doc['@timestamp'].value.dayOfWeekEnum.name())"},
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"@timestamp"}
+
+    def test_multiple_fields_in_runtime_mapping(self):
+        body = {"runtime_mappings": {
+            "profit": {
+                "type": "double",
+                "script": {"source": "emit(doc['revenue'].value - doc['cost'].value)"},
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"revenue", "cost"}
+
+    def test_runtime_mapping_string_script(self):
+        body = {"runtime_mappings": {
+            "upper_name": {
+                "type": "keyword",
+                "script": "emit(doc['name'].value.toUpperCase())",
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"name"}
+
+
+class TestFunctionScore:
+    """function_score — custom scoring with scripts and field references."""
+
+    def test_script_score(self):
+        body = {"query": {"function_score": {
+            "query": {"match": {"title": "laptop"}},
+            "functions": [
+                {"script_score": {"script": {"source": "doc['popularity'].value * 2"}}},
+            ],
+        }}}
+        refs = extract_fields_from_search(body)
+        assert refs.queried == {"title", "popularity"}
+
+    def test_field_value_factor(self):
+        body = {"query": {"function_score": {
+            "query": {"match_all": {}},
+            "functions": [
+                {"field_value_factor": {"field": "likes", "modifier": "log1p"}},
+            ],
+        }}}
+        refs = extract_fields_from_search(body)
+        assert refs.queried == {"likes"}
+
+    def test_decay_function(self):
+        body = {"query": {"function_score": {
+            "query": {"match_all": {}},
+            "functions": [
+                {"gauss": {"location": {"origin": "0,0", "scale": "5km"}}},
+                {"exp": {"created_at": {"origin": "now", "scale": "10d"}}},
+            ],
+        }}}
+        refs = extract_fields_from_search(body)
+        assert refs.queried == {"location", "created_at"}
+
+    def test_combined_functions(self):
+        body = {"query": {"function_score": {
+            "query": {"bool": {"filter": [{"term": {"status": "active"}}]}},
+            "functions": [
+                {"script_score": {"script": {"source": "doc['boost_factor'].value"}}},
+                {"field_value_factor": {"field": "popularity"}},
+            ],
+        }}}
+        refs = extract_fields_from_search(body)
+        assert refs.filtered == {"status"}
+        assert refs.queried == {"boost_factor", "popularity"}
+
+    def test_function_score_in_filter_context(self):
+        body = {"query": {"bool": {"filter": [
+            {"function_score": {
+                "query": {"match_all": {}},
+                "functions": [{"field_value_factor": {"field": "rank"}}],
+            }},
+        ]}}}
+        refs = extract_fields_from_search(body)
+        assert refs.filtered == {"rank"}
+
+
+class TestScriptedSort:
+    """sort with _script — scripted sort expressions."""
+
+    def test_scripted_sort_painless(self):
+        body = {"sort": [
+            {"_script": {
+                "type": "number",
+                "script": {"source": "doc['priority'].value * doc['weight'].value"},
+                "order": "desc",
+            }},
+        ]}
+        refs = extract_fields_from_search(body)
+        assert refs.sorted == {"priority", "weight"}
+
+    def test_scripted_sort_mixed_with_regular(self):
+        body = {"sort": [
+            {"timestamp": "desc"},
+            {"_script": {
+                "type": "number",
+                "script": {"source": "doc['score'].value"},
+                "order": "asc",
+            }},
+        ]}
+        refs = extract_fields_from_search(body)
+        assert refs.sorted == {"timestamp", "score"}
+
+    def test_scripted_sort_string_script(self):
+        body = {"sort": [
+            {"_script": {
+                "type": "number",
+                "script": "doc['priority'].value",
+                "order": "desc",
+            }},
+        ]}
+        refs = extract_fields_from_search(body)
+        assert refs.sorted == {"priority"}
+
+
+class TestPipelineAggScripts:
+    """bucket_script, bucket_selector, scripted_metric — script-based aggregations."""
+
+    def test_bucket_script(self):
+        body = {"aggs": {
+            "sales_per_month": {
+                "date_histogram": {"field": "date", "calendar_interval": "month"},
+                "aggs": {
+                    "total_sales": {"sum": {"field": "sales"}},
+                    "profit": {
+                        "bucket_script": {
+                            "buckets_path": {"sales": "total_sales"},
+                            "script": {"source": "doc['margin_pct'].value * params.sales"},
+                        },
+                    },
+                },
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert "date" in refs.aggregated
+        assert "sales" in refs.aggregated
+        assert "margin_pct" in refs.aggregated
+
+    def test_bucket_selector(self):
+        body = {"aggs": {
+            "by_category": {
+                "terms": {"field": "category"},
+                "aggs": {
+                    "avg_price": {"avg": {"field": "price"}},
+                    "high_value_only": {
+                        "bucket_selector": {
+                            "buckets_path": {"avg": "avg_price"},
+                            "script": {"source": "doc['min_threshold'].value < params.avg"},
+                        },
+                    },
+                },
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert "category" in refs.aggregated
+        assert "price" in refs.aggregated
+        assert "min_threshold" in refs.aggregated
+
+    def test_scripted_metric(self):
+        body = {"aggs": {
+            "weighted_avg": {
+                "scripted_metric": {
+                    "init_script": {"source": "state.totals = []"},
+                    "map_script": {"source": "state.totals.add(doc['price'].value * doc['quantity'].value)"},
+                    "combine_script": {"source": "double total = 0; for (t in state.totals) { total += t } return total"},
+                    "reduce_script": {"source": "double total = 0; for (s in states) { total += s } return total"},
+                },
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.aggregated == {"price", "quantity"}
+
+    def test_scripted_metric_string_scripts(self):
+        body = {"aggs": {
+            "custom": {
+                "scripted_metric": {
+                    "init_script": "state.vals = []",
+                    "map_script": "state.vals.add(doc['amount'].value)",
+                    "combine_script": "return state.vals.sum()",
+                    "reduce_script": "return states.sum()",
+                },
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.aggregated == {"amount"}
+
+
+class TestScriptLangHandling:
+    """Verify language detection: Painless default, explicit lang, mustache skip."""
+
+    def test_default_lang_is_painless(self):
+        """No lang specified → treated as Painless."""
+        body = {"script_fields": {
+            "val": {"script": {"source": "doc['price'].value"}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"price"}
+
+    def test_explicit_painless(self):
+        body = {"script_fields": {
+            "val": {"script": {"lang": "painless", "source": "doc['price'].value"}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"price"}
+
+    def test_mustache_skipped(self):
+        body = {"script_fields": {
+            "val": {"script": {"lang": "mustache", "source": "{{price}}"}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == set()
+
+    def test_inline_field_for_old_api(self):
+        """ES 5.x used 'inline' instead of 'source'."""
+        body = {"script_fields": {
+            "val": {"script": {"inline": "doc['price'].value"}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == {"price"}
+
+    def test_no_source_returns_nothing(self):
+        body = {"script_fields": {
+            "val": {"script": {"id": "my_stored_script", "params": {"field": "price"}}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.sourced == set()

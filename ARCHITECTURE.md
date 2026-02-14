@@ -76,12 +76,14 @@ For request bodies below `PROXY_BODY_LIMIT` (default 1MB), the body is buffered 
 ### gateway/extractor.py — DSL Field Extractor
 
 Walks Elasticsearch Query DSL JSON to extract field references into categories:
-- **queried**: Fields in `match`, `term`, `multi_match`, `exists`, `highlight`, suggesters, etc.
+- **queried**: Fields in `match`, `term`, `multi_match`, `exists`, `highlight`, suggesters, `function_score` (script_score, field_value_factor, decay functions), etc.
 - **filtered**: Fields inside `bool.filter` context, `post_filter`, `collapse`, filter agg queries.
-- **aggregated**: Fields in `aggs` (terms, avg, sum, date_histogram, composite sources, etc.).
-- **sorted**: Fields in `sort` clauses.
-- **sourced**: Fields in `_source`, `docvalue_fields`, `stored_fields`.
+- **aggregated**: Fields in `aggs` (terms, avg, sum, date_histogram, composite sources, `scripted_metric`, `bucket_script`, `bucket_selector`, etc.).
+- **sorted**: Fields in `sort` clauses, including scripted sorts (`_script`).
+- **sourced**: Fields in `_source`, `docvalue_fields`, `stored_fields`, `script_fields`, `runtime_mappings`.
 - **written**: Fields in document bodies (index, create, update via bulk).
+
+**Painless script extraction**: Fields referenced inside Painless scripts (`doc['field']`, `doc["field"]`, `ctx._source.field`) are extracted via regex patterns. The extractor checks the script's `lang` field (defaults to `"painless"`) and skips Mustache templates and stored scripts. Coverage is ~90% — fields stored in variables or dynamically constructed are not tracked.
 
 Also extracts **lookback** information from `range` queries with `now-*` syntax.
 
@@ -358,7 +360,7 @@ For the full tech stack evaluation (Kong, Go rewrite, and why we hardened Python
 
 - **No authentication**: The gateway does not add auth headers. Designed for same-trust-zone deployment.
 - **No SQL/ES|QL query parsing**: Only DSL queries are analyzed. ES SQL and ES|QL queries pass through unobserved.
-- **No Painless script field extraction**: Fields accessed via `doc['field']` in scripts (script_fields, runtime_mappings, function_score) are not tracked.
+- **Partial Painless script coverage**: Fields accessed via `doc['field']` and `ctx._source.field` are extracted (~90% coverage). Fields stored in Painless variables or dynamically constructed names are not tracked.
 - **Partial msearch support**: msearch query bodies are parsed, but per-query index targeting from headers is not tracked.
 - **No streaming**: Large request/response bodies above 1MB are streamed, but observation (field extraction) only applies to buffered bodies below the threshold.
 - **Horizontal scaling**: Supports multiple Uvicorn workers per pod and multiple pods via OpenShift HPA. State is per-process (no shared state required).

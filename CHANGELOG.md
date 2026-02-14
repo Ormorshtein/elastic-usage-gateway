@@ -4,6 +4,36 @@ Reverse-chronological record of significant changes, decisions, and lessons lear
 
 ---
 
+## 2026-02-14 — Deliverable 7: Painless Script Field Extraction
+
+Closed the last major extraction blind spot. Fields accessed via Painless scripts (`doc['field']`, `ctx._source.field`) were previously invisible — the extractor now parses them from all DSL locations where scripts appear. This eliminates false "unused field" classifications and incorrect `remove_field` recommendations for script-dependent fields.
+
+**What changed:**
+- New `_extract_script_fields()` helper in `gateway/extractor.py` — regex-based extraction of field references from Painless script source strings
+- 3 regex patterns: `doc['field']`, `doc["field"]`, `ctx._source.field`
+- Language-aware: checks `lang` field (defaults to `"painless"` if absent), skips Mustache templates and stored scripts
+- Supports legacy `inline` field (ES 5.x) alongside modern `source` field
+
+**5 DSL locations wired in:**
+
+| Location | DSL key | Fields go to |
+|----------|---------|-------------|
+| Computed columns | `script_fields` | `sourced` |
+| Virtual fields | `runtime_mappings` | `sourced` |
+| Custom scoring | `function_score` (script_score, field_value_factor, decay) | `queried` |
+| Scripted sort | `sort[{_script: ...}]` | `sorted` |
+| Pipeline/scripted aggs | `bucket_script`, `bucket_selector`, `scripted_metric` | `aggregated` |
+
+**Design decisions:**
+- `function_score` also extracts non-script field references: `field_value_factor.field` and decay function fields (`gauss`, `linear`, `exp`) — these were previously untracked.
+- The `language` event field stays `"dsl"` — a DSL query containing a script is still DSL. The `language` field is reserved for truly different query languages (SQL, ES|QL).
+- ~90% coverage — misses fields stored in Painless variables or dynamic field names (rare in practice).
+
+**Files changed:** `gateway/extractor.py`, `tests/test_extractor.py`, `CHANGELOG.md`, `ARCHITECTURE.md`, `ROADMAP.md`
+**Tests added:** 27 new (331 total)
+
+---
+
 ## 2026-02-14 — Deliverable 6: Mapping Recommendations Engine
 
 Added an automated recommendation engine that turns mapping diff classifications into specific, actionable mapping changes. The recommender reads from `.mapping-diff`, applies 8 decision rules, and writes results to a new `.mapping-recommendations` index. Each recommendation includes a detailed **why** (explanation of the problem, tradeoffs, and risks) and **how** (concrete JSON mapping snippets and step-by-step instructions).

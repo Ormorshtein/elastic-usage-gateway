@@ -5,9 +5,15 @@ This is NOT a full Query DSL parser. It handles the most common patterns:
 - match, term, terms, range, exists, wildcard, prefix, fuzzy, match_phrase
 - bool (must, should, must_not, filter)
 - aggregations (terms, avg, sum, min, max, cardinality, value_count, stats,
-  extended_stats, date_histogram, histogram, range)
-- sort
-- _source
+  extended_stats, date_histogram, histogram, range, scripted_metric,
+  bucket_script, bucket_selector)
+- sort (including scripted sort via _script)
+- _source, docvalue_fields, stored_fields
+- script_fields, runtime_mappings (Painless script field extraction)
+- function_score (script_score, field_value_factor, decay functions)
+
+Painless scripts are parsed via regex to extract doc['field'] and
+ctx._source.field references (~90% coverage).
 
 Unknown structures are skipped silently. The extractor never raises — it
 returns what it can find.
@@ -26,6 +32,11 @@ logger = logging.getLogger(__name__)
 _LOOKBACK_RE = re.compile(r"^now-(\d+)([smhdw])$")
 _TIME_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 _BOOST_RE = re.compile(r"\^[\d.]+$")
+
+# Painless script field-reference patterns
+_PAINLESS_DOC_SQ = re.compile(r"doc\['\s*([^']+?)\s*'\]")     # doc['field']
+_PAINLESS_DOC_DQ = re.compile(r'doc\["\s*([^"]+?)\s*"\]')     # doc["field"]
+_PAINLESS_CTX = re.compile(r"ctx\._source\.(\w+)")             # ctx._source.field
 
 
 @dataclass
@@ -104,6 +115,31 @@ class FieldRefs:
 def _is_user_field(name: str) -> bool:
     """Return True if name looks like a user-defined field (not internal)."""
     return name not in _INTERNAL_FIELDS and not name.startswith("_")
+
+
+def _extract_script_fields(script_obj, target: set[str]) -> None:
+    """Extract field references from an ES script object into target set.
+
+    Handles Painless (default) and Expression languages.
+    Skips Mustache (template params) and stored scripts (no source available).
+    """
+    if isinstance(script_obj, str):
+        # Short-form: {"script": "doc['price'].value * 2"}
+        source, lang = script_obj, "painless"
+    elif isinstance(script_obj, dict):
+        source = script_obj.get("source") or script_obj.get("inline", "")
+        lang = script_obj.get("lang", "painless")
+    else:
+        return
+
+    if not source or lang in ("mustache",):
+        return
+
+    for pattern in (_PAINLESS_DOC_SQ, _PAINLESS_DOC_DQ, _PAINLESS_CTX):
+        for m in pattern.finditer(source):
+            field = m.group(1)
+            if _is_user_field(field):
+                target.add(field)
 
 
 def _extract_query_fields(
@@ -186,6 +222,33 @@ def _extract_query_fields(
                     target.add(clean)
             continue
 
+        # function_score — custom scoring with scripts, field_value_factor, decay
+        if key == "function_score" and isinstance(value, dict):
+            inner_query = value.get("query")
+            if inner_query:
+                _extract_query_fields(inner_query, refs, context, lookbacks)
+            for func in value.get("functions", []):
+                if not isinstance(func, dict):
+                    continue
+                # script_score — Painless scoring script
+                script_score = func.get("script_score")
+                if isinstance(script_score, dict):
+                    _extract_script_fields(script_score.get("script"), target)
+                # field_value_factor — direct field reference
+                fvf = func.get("field_value_factor")
+                if isinstance(fvf, dict):
+                    f = fvf.get("field")
+                    if f and _is_user_field(f):
+                        target.add(f)
+                # Decay functions (gauss, linear, exp)
+                for decay_type in ("gauss", "linear", "exp"):
+                    decay = func.get(decay_type)
+                    if isinstance(decay, dict):
+                        for field_name in decay:
+                            if _is_user_field(field_name):
+                                target.add(field_name)
+            continue
+
 
 def _extract_agg_fields(aggs: dict, target: set[str], refs: FieldRefs | None = None) -> None:
     """Extract field names from aggregation definitions."""
@@ -235,6 +298,17 @@ def _extract_agg_fields(aggs: dict, target: set[str], refs: FieldRefs | None = N
                         if isinstance(filter_query, dict):
                             _extract_query_fields(filter_query, refs, context="filtered")
 
+        # Script-based aggs: scripted_metric, bucket_script, bucket_selector
+        scripted_metric = agg_def.get("scripted_metric")
+        if isinstance(scripted_metric, dict):
+            for script_key in ("init_script", "map_script", "combine_script", "reduce_script"):
+                _extract_script_fields(scripted_metric.get(script_key), target)
+
+        for pipeline_type in ("bucket_script", "bucket_selector"):
+            pipeline = agg_def.get(pipeline_type)
+            if isinstance(pipeline, dict):
+                _extract_script_fields(pipeline.get("script"), target)
+
         # Recurse into sub-aggregations
         for sub_key in ("aggs", "aggregations"):
             sub_aggs = agg_def.get(sub_key)
@@ -253,8 +327,10 @@ def _extract_sort_fields(sort: list | dict, target: set[str]) -> None:
             if isinstance(item, str) and _is_user_field(item):
                 target.add(item)
             elif isinstance(item, dict):
-                for field_name in item:
-                    if _is_user_field(field_name):
+                for field_name, sort_spec in item.items():
+                    if field_name == "_script" and isinstance(sort_spec, dict):
+                        _extract_script_fields(sort_spec.get("script"), target)
+                    elif _is_user_field(field_name):
                         target.add(field_name)
 
 
@@ -346,6 +422,24 @@ def extract_fields_from_search(body: dict) -> FieldRefs:
         f = collapse.get("field")
         if f and _is_user_field(f):
             refs.filtered.add(f)
+
+    # script_fields — computed columns via Painless scripts
+    script_fields = body.get("script_fields")
+    if isinstance(script_fields, dict):
+        for _alias, spec in script_fields.items():
+            if isinstance(spec, dict):
+                _extract_script_fields(spec.get("script"), refs.sourced)
+
+    # runtime_mappings — virtual fields defined at query time
+    runtime_mappings = body.get("runtime_mappings")
+    if isinstance(runtime_mappings, dict):
+        for _field_alias, spec in runtime_mappings.items():
+            if isinstance(spec, dict):
+                script = spec.get("script")
+                if isinstance(script, dict):
+                    _extract_script_fields(script, refs.sourced)
+                elif isinstance(script, str):
+                    _extract_script_fields(script, refs.sourced)
 
     # Pick widest lookback window
     if lookbacks:
