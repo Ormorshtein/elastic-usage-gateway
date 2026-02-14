@@ -102,6 +102,55 @@ def products_match_all(**kwargs):
     return "POST", "/products/_search", json.dumps(body)
 
 
+def products_boosted_search(**kwargs):
+    """function_score with script_score boosting by rating, plus field_value_factor on stock."""
+    term = random.choice(SEARCH_TERMS)
+    body = {
+        "query": {
+            "function_score": {
+                "query": {"match": {"title": term}},
+                "functions": [
+                    {
+                        "script_score": {
+                            "script": {
+                                "source": "doc['rating'].value * doc['price'].value / 100"
+                            }
+                        }
+                    },
+                    {
+                        "field_value_factor": {
+                            "field": "stock_count",
+                            "modifier": "log1p",
+                        }
+                    },
+                ],
+                "boost_mode": "multiply",
+            }
+        },
+        "_source": ["title", "price", "rating"],
+        "size": 10,
+    }
+    return "POST", "/products/_search", json.dumps(body)
+
+
+def products_discounted_price(**kwargs):
+    """script_fields computing a discounted price from price field."""
+    discount = round(random.uniform(0.05, 0.30), 2)
+    body = {
+        "query": {"bool": {"filter": [{"term": {"category": random.choice(PRODUCT_CATEGORIES)}}]}},
+        "_source": ["title", "category"],
+        "script_fields": {
+            "discounted_price": {
+                "script": {
+                    "source": f"doc['price'].value * {1 - discount}"
+                }
+            }
+        },
+        "size": 10,
+    }
+    return "POST", "/products/_search", json.dumps(body)
+
+
 # -- Products write operations --
 
 PRODUCT_TAGS_POOL = ["wireless", "bluetooth", "premium", "eco-friendly", "bestseller", "new-arrival"]
@@ -246,6 +295,28 @@ def logs_filter_by_service_and_status(**kwargs):
     return "POST", "/logs/_search", json.dumps(body)
 
 
+def logs_slow_request_score(**kwargs):
+    """script_fields computing a severity score from duration_ms and status_code."""
+    body = {
+        "query": {"bool": {"filter": [{"range": {"duration_ms": {"gte": 100}}}]}},
+        "_source": ["timestamp", "service", "endpoint", "duration_ms", "status_code"],
+        "script_fields": {
+            "severity_score": {
+                "script": {
+                    "source": (
+                        "double score = doc['duration_ms'].value / 1000.0; "
+                        "if (doc['status_code'].value >= 500) { score = score * 3; } "
+                        "return score;"
+                    )
+                }
+            }
+        },
+        "sort": [{"duration_ms": {"order": "desc"}}],
+        "size": 20,
+    }
+    return "POST", "/logs/_search", json.dumps(body)
+
+
 # -- Logs write operations --
 
 LOG_INGEST_ENDPOINTS = ["/api/users", "/api/orders", "/api/search", "/api/products", "/api/auth/login"]
@@ -365,6 +436,46 @@ def orders_agg_by_country(**kwargs):
     return "POST", "/orders/_search", json.dumps(body)
 
 
+def orders_runtime_day_of_week(**kwargs):
+    """runtime_mappings extracting day of week from order_date."""
+    body = {
+        "size": 0,
+        "runtime_mappings": {
+            "day_of_week": {
+                "type": "keyword",
+                "script": {
+                    "source": "emit(doc['order_date'].value.dayOfWeekEnum.name())"
+                },
+            }
+        },
+        "aggs": {
+            "by_day": {"terms": {"field": "day_of_week", "size": 7}},
+        },
+    }
+    return "POST", "/orders/_search", json.dumps(body)
+
+
+def orders_scripted_sort_value(**kwargs):
+    """Scripted sort by total_amount * item_count (order value density)."""
+    body = {
+        "query": {"bool": {"filter": [{"term": {"status": random.choice(["confirmed", "shipped"])}}]}},
+        "sort": [
+            {
+                "_script": {
+                    "type": "number",
+                    "script": {
+                        "source": "doc['total_amount'].value * doc['item_count'].value"
+                    },
+                    "order": "desc",
+                }
+            }
+        ],
+        "_source": ["order_id", "customer_name", "total_amount", "item_count"],
+        "size": 20,
+    }
+    return "POST", "/orders/_search", json.dumps(body)
+
+
 # -- Orders write operations --
 
 ORDERS_CONCRETE_INDICES = ["orders-us", "orders-eu"]
@@ -415,6 +526,8 @@ SCENARIOS = {
             "search_by_description": search_by_description,
             "get_by_id": products_get_by_id,
             "match_all": products_match_all,
+            "boosted_search": products_boosted_search,
+            "discounted_price": products_discounted_price,
             "index_single": products_index_single,
             "bulk_index": products_bulk_index,
             "update_price_stock": products_update_price_stock,
@@ -427,6 +540,8 @@ SCENARIOS = {
             "search_by_description": 5,
             "get_by_id": 3,
             "match_all": 2,
+            "boosted_search": 5,
+            "discounted_price": 3,
             "index_single": 3,
             "bulk_index": 3,
             "update_price_stock": 5,
@@ -439,6 +554,8 @@ SCENARIOS = {
             "search_by_description": "Search by description",
             "get_by_id": "Get by ID",
             "match_all": "Match all",
+            "boosted_search": "Boosted search (script_score)",
+            "discounted_price": "Discounted price (script_fields)",
             "index_single": "Index single product",
             "bulk_index": "Bulk index products",
             "update_price_stock": "Update price/stock",
@@ -454,6 +571,7 @@ SCENARIOS = {
             "logs_agg_by_service": logs_agg_by_service,
             "logs_agg_over_time": logs_agg_over_time,
             "logs_filter_by_service_and_status": logs_filter_by_service_and_status,
+            "logs_slow_request_score": logs_slow_request_score,
             "logs_bulk_ingest": logs_bulk_ingest,
         },
         "weights": {
@@ -462,6 +580,7 @@ SCENARIOS = {
             "logs_agg_by_service": 20,
             "logs_agg_over_time": 15,
             "logs_filter_by_service_and_status": 10,
+            "logs_slow_request_score": 5,
             "logs_bulk_ingest": 8,
         },
         "labels": {
@@ -470,6 +589,7 @@ SCENARIOS = {
             "logs_agg_by_service": "Aggregate by service",
             "logs_agg_over_time": "Histogram over time",
             "logs_filter_by_service_and_status": "Filter service + error status",
+            "logs_slow_request_score": "Severity score (script_fields)",
             "logs_bulk_ingest": "Bulk ingest logs",
         },
         "time_range_queries": {"logs_filter_by_level", "logs_agg_over_time"},
@@ -484,6 +604,8 @@ SCENARIOS = {
             "orders_search_customer": orders_search_customer,
             "orders_date_range": orders_date_range,
             "orders_agg_by_country": orders_agg_by_country,
+            "orders_runtime_day_of_week": orders_runtime_day_of_week,
+            "orders_scripted_sort_value": orders_scripted_sort_value,
             "orders_create_new": orders_create_new,
             "orders_update_status": orders_update_status,
         },
@@ -494,6 +616,8 @@ SCENARIOS = {
             "orders_search_customer": 15,
             "orders_date_range": 15,
             "orders_agg_by_country": 10,
+            "orders_runtime_day_of_week": 5,
+            "orders_scripted_sort_value": 3,
             "orders_create_new": 5,
             "orders_update_status": 5,
         },
@@ -504,6 +628,8 @@ SCENARIOS = {
             "orders_search_customer": "Search customer name",
             "orders_date_range": "Date range filter",
             "orders_agg_by_country": "Revenue by country",
+            "orders_runtime_day_of_week": "Day of week (runtime_mappings)",
+            "orders_scripted_sort_value": "Sort by order value (scripted sort)",
             "orders_create_new": "Create new order",
             "orders_update_status": "Update order status",
         },
