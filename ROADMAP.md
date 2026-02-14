@@ -87,15 +87,19 @@ New panels in the "Query Patterns" section:
 ---
 
 ## Deliverable 4: Client Attribution (Feature 2)
-**Status: [ ] NOT STARTED**
+**Status: [x] DONE (2026-02-13)**
 
 **Value:** "Who would break if we remove field X?" blocks every schema change. Without client attribution, you can't do impact analysis. Unlocks CI/CD validation API later.
 
 **Scope:**
-- Capture `client_ip`, `client_user_agent` in events
-- 3 new endpoints: `/_gateway/clients`, `/_gateway/client-usage`, `/_gateway/field-clients`
+- Capture `client_ip`, `client_user_agent`, `client_id` (via `x-client-id` header) in every usage event
+- Client attribution surfaced via Kibana dashboards (not JSON endpoints — consistent with Kibana-first pivot):
+  - 5-panel Client Attribution section in Usage & Heat Dashboard
+  - Field Drill-Down dashboard includes clients table, client IPs table, user-agents pie chart
+- Original plan listed 3 JSON endpoints (`/_gateway/clients`, etc.) — superseded by the Kibana-first approach adopted in the analysis endpoint removal
 
-**Files:** `gateway/events.py`, `gateway/main.py`, tests
+**Files changed:** `gateway/events.py`, `gateway/main.py`, `kibana_setup.py`, `tests/test_events.py`
+**Tests added:** 4 new
 
 ---
 
@@ -197,19 +201,18 @@ These are not yet broken into testable deliverables. Scope when the above are do
 D1 (Parsing Fixes) ✅
 D2 (Heat Scoring) ✅
 D3 (Templates) ✅
-D4 (Clients) ────────── standalone, can start now
+D4 (Clients) ✅
 
 D5 (Mapping Diff) ✅
 D6 (Recommendations) ✅
 D7 (Painless) ✅
 D8 (Index Arch Recs) ── needs _stats polling (new) + lookback data (D1-D3)
 
-CI/CD Validation ───── after D3 + D4 + D5
-Alerting ───────────── after D3 + D5
-Lineage ────────────── after D5
-Cost Attribution ───── after D3
+CI/CD Validation ───── after D3 ✅ + D4 ✅ + D5 ✅ → ready to start
+Alerting ───────────── after D3 ✅ + D5 ✅ → ready to start
+Lineage ────────────── after D5 ✅ → ready to start
+Cost Attribution ───── after D3 ✅ → ready to start
 ```
 
-Deliverables 2, 3, 4, and 7 can all be built in parallel (no dependencies on each other).
-Deliverable 5 should follow because it unlocks the most downstream features.
-Deliverable 8 can start anytime — its only new dependency is `_stats` API polling, which is self-contained.
+Deliverables 1-7 are complete. D8 can start anytime — its only new dependency is `_stats` API polling, which is self-contained.
+All future deliverables (CI/CD Validation, Alerting, Lineage, Cost Attribution) have their prerequisites met.

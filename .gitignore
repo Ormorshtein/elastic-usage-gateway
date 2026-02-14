@@ -26,5 +26,11 @@ nul
 # Claude Code
 .claude/
 
+# Logs
+*.log
+
+# Scratch / debug artifacts
+kibana_check.json
+
 # Docker data (managed by docker-compose volumes)
 es-data/

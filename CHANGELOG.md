@@ -130,6 +130,23 @@ Added mapping-vs-usage comparison engine. The gateway now periodically fetches i
 
 ---
 
+## 2026-02-13 — Deliverable 4: Client Attribution
+
+Added client identification to every usage event. Each proxied request now captures the caller's IP address, User-Agent header, and optional `x-client-id` header. This enables impact analysis for schema changes — "who would break if we remove field X?" — by showing which clients, services, and IPs depend on each field.
+
+**What changed:**
+- `client_ip`, `client_user_agent`, and `client_id` fields added to `build_event()` in `gateway/events.py`
+- `gateway/main.py` extracts these from the incoming request headers and passes them through
+- 5 new Kibana panels in a Client Attribution section on the Usage & Heat Dashboard: top client IDs (bar), top client IPs (table), user-agent breakdown (pie), clients over time (stacked area), client × index group matrix (table)
+- Field Drill-Down dashboard includes per-field client panels (clients table, client IPs table, user-agents pie)
+
+**Design decision:** The original D4 scope listed 3 JSON API endpoints (`/_gateway/clients`, `/_gateway/client-usage`, `/_gateway/field-clients`). These were never built — the project pivoted to a Kibana-first approach (all JSON analysis endpoints were removed in the same sprint). Client data is surfaced entirely through Kibana dashboards, consistent with how D2, D3, D5, and D6 deliver insights.
+
+**Files changed:** `gateway/events.py`, `gateway/main.py`, `kibana_setup.py`, `tests/test_events.py`
+**Tests added:** 4 new
+
+---
+
 ## 2026-02-13 — Remove Analysis Endpoints, Deliver Insights via Kibana Dashboards
 
 Removed both `GET /_gateway/heat` and `GET /_gateway/query-patterns` JSON endpoints. All analysis is now delivered through **Kibana dashboards** with inline guidance text in Markdown panels. Deleted `gateway/analyzer.py` entirely.
