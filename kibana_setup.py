@@ -10,7 +10,8 @@ Dashboards created:
   2. Usage & Heat            — query traffic patterns + field heat (with index_group filter)
   3. Multi-Index Comparison  — cross-index-group heat and operations
   4. Mapping Diff            — field usage vs. mapping comparison (from .mapping-diff index)
-  5. Field Drill-Down        — per-field usage investigation (clients, templates, response time)
+  5. Mapping Recommendations — actionable optimization advice (from .mapping-recommendations index)
+  6. Field Drill-Down        — per-field usage investigation (clients, templates, response time)
 
 Usage:
     python kibana_setup.py
@@ -211,7 +212,7 @@ def _control_group_input(data_view_id: str) -> tuple[dict, list[dict]]:
     return control_input, refs
 
 
-def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, orders_dv_id: str, diff_dv_id: str = "dv-mapping-diff") -> list[dict]:
+def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, orders_dv_id: str, diff_dv_id: str = "dv-mapping-diff", rec_dv_id: str = "dv-recommendations") -> list[dict]:
     """Build all visualization + dashboard saved objects."""
     objects = []
 
@@ -1373,6 +1374,196 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "references": diff_refs,
     })
 
+    # =========================================================
+    # RECOMMENDATIONS VISUALIZATIONS (from .mapping-recommendations)
+    # =========================================================
+
+    objects.append(_markdown(
+        "md-header-rec-overview", "Section: Mapping Recommendations",
+        "## Mapping Recommendations\n"
+        "Actionable optimization advice generated from field usage analysis. "
+        "Each recommendation identifies a specific field and explains **why** a change "
+        "is beneficial (with tradeoffs) and **how** to implement it (with JSON mapping snippets).\n\n"
+        "**Recommendation types:**\n"
+        "- **disable_index** — field has inverted index and/or doc_values but is never searched. "
+        "Set `index: false, doc_values: false` to save CPU and disk.\n"
+        "- **disable_doc_values** — field is queried/filtered but never aggregated or sorted. "
+        "Disable the columnar store.\n"
+        "- **disable_norms** — text field used only in filter context (never scored). "
+        "Norms waste ~1 byte/doc.\n"
+        "- **change_to_keyword** — text field only used with exact-match queries. "
+        "Keyword type is more efficient. *Breaking change — requires reindex.*\n"
+        "- **add_keyword_subfield** — text field needs both full-text and exact-match. "
+        "Add a `.keyword` multi-field.\n"
+        "- **remove_multifield** / **remove_field** — zero usage, safe to remove.\n\n"
+        "**How to use this dashboard:**\n"
+        "- Start with the **All Recommendations** table — filter by `index_group` using the control above.\n"
+        "- Expand a row to read the full `why` and `how` text.\n"
+        "- Check the **Breaking Changes** table before making any changes that require reindex.\n"
+        "- After applying a change, re-run `POST /_gateway/recommendations/refresh` to verify it disappears.",
+    ))
+
+    REC_BAR_AXES = {
+        "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "left",
+                          "show": True, "style": {}, "scale": {"type": "linear"},
+                          "labels": {"show": True, "filter": True, "truncate": 100}, "title": {}}],
+        "valueAxes": [{"id": "ValueAxis-1", "name": "BottomAxis-1", "type": "value",
+                       "position": "bottom", "show": True, "style": {},
+                       "scale": {"type": "linear", "mode": "normal"},
+                       "labels": {"show": True, "rotate": 0, "filter": False, "truncate": 100},
+                       "title": {"text": "Recommendations"}}],
+    }
+
+    objects.append(_vis(
+        "vis-rec-by-type", "Recommendation Count by Type", "horizontal_bar",
+        {"type": "horizontal_bar", "grid": {"categoryLines": False}, **REC_BAR_AXES,
+         "seriesParams": [{"show": True, "type": "histogram", "mode": "normal",
+                           "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Count", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2,
+                           "showCircles": True}],
+         "addTooltip": True, "addLegend": False, "legendPosition": "right",
+         "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "recommendation", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+        ],
+        rec_dv_id,
+    ))
+
+    objects.append(_vis(
+        "vis-rec-by-group", "Recommendations by Index Group", "horizontal_bar",
+        {"type": "horizontal_bar", "grid": {"categoryLines": False}, **REC_BAR_AXES,
+         "seriesParams": [{"show": True, "type": "histogram", "mode": "stacked",
+                           "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Count", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2,
+                           "showCircles": True}],
+         "addTooltip": True, "addLegend": True, "legendPosition": "right",
+         "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "index_group", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "recommendation", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "group"},
+        ],
+        rec_dv_id,
+    ))
+
+    objects.append(_vis(
+        "vis-rec-all-table", "All Recommendations", "table",
+        {**TABLE_PARAMS, "perPage": 25, "totalFunc": "count"},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "index_group", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "field_name", "size": 200,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "4", "enabled": True, "type": "terms",
+             "params": {"field": "mapped_type", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "5", "enabled": True, "type": "terms",
+             "params": {"field": "recommendation", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "6", "enabled": True, "type": "terms",
+             "params": {"field": "why", "size": 200,
+                        "order": "desc", "orderBy": "1",
+                        "customLabel": "Why"},
+             "schema": "bucket"},
+            {"id": "7", "enabled": True, "type": "terms",
+             "params": {"field": "how", "size": 200,
+                        "order": "desc", "orderBy": "1",
+                        "customLabel": "How"},
+             "schema": "bucket"},
+        ],
+        rec_dv_id,
+    ))
+
+    objects.append(_vis(
+        "vis-rec-breaking", "Breaking Changes (Require Reindex)", "table",
+        {**TABLE_PARAMS, "perPage": 25},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "index_group", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "field_name", "size": 200,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "4", "enabled": True, "type": "terms",
+             "params": {"field": "recommendation", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "bucket"},
+            {"id": "5", "enabled": True, "type": "terms",
+             "params": {"field": "why", "size": 200,
+                        "order": "desc", "orderBy": "1",
+                        "customLabel": "Why"},
+             "schema": "bucket"},
+            {"id": "6", "enabled": True, "type": "terms",
+             "params": {"field": "how", "size": 200,
+                        "order": "desc", "orderBy": "1",
+                        "customLabel": "How"},
+             "schema": "bucket"},
+        ],
+        rec_dv_id,
+        search_query="breaking_change: true",
+    ))
+
+    # Recommendations dashboard
+    rec_control_input, rec_control_refs = _control_group_input(rec_dv_id)
+    rec_panels = [
+        panel_ref(0, "md-header-rec-overview",  0,  0, 48, 16),
+        panel_ref(1, "vis-rec-by-type",          0, 16, 20, 14),
+        panel_ref(2, "vis-rec-by-group",        20, 16, 28, 14),
+        panel_ref(3, "vis-rec-all-table",        0, 30, 48, 22),
+        panel_ref(4, "vis-rec-breaking",         0, 52, 48, 16),
+    ]
+    rec_refs = [
+        {"name": "panel_0", "type": "visualization", "id": "md-header-rec-overview"},
+        {"name": "panel_1", "type": "visualization", "id": "vis-rec-by-type"},
+        {"name": "panel_2", "type": "visualization", "id": "vis-rec-by-group"},
+        {"name": "panel_3", "type": "visualization", "id": "vis-rec-all-table"},
+        {"name": "panel_4", "type": "visualization", "id": "vis-rec-breaking"},
+    ] + rec_control_refs
+    objects.append({
+        "id": "mapping-recommendations",
+        "type": "dashboard",
+        "attributes": {
+            "title": "Mapping Recommendations — Actionable Optimization Advice",
+            "controlGroupInput": rec_control_input,
+            "panelsJSON": json.dumps(rec_panels),
+            "optionsJSON": json.dumps({
+                "useMargins": True, "syncColors": True, "syncCursor": True,
+                "syncTooltips": False, "hidePanelTitles": False,
+            }),
+            "timeRestore": True,
+            "timeTo": "now",
+            "timeFrom": "now-24h",
+            "kibanaSavedObjectMeta": {
+                "searchSourceJSON": json.dumps({
+                    "query": {"query": "", "language": "kuery"}, "filter": [],
+                })
+            },
+        },
+        "references": rec_refs,
+    })
+
     # Field Drill-Down dashboard (per-field investigation from .usage-events)
     # Controls: index_group + field category dropdowns (queried, filtered, aggregated).
     # User picks a field in ONE category dropdown; all panels filter to matching events.
@@ -1535,6 +1726,32 @@ def import_objects(base_url: str, objects: list[dict]) -> None:
         print(f"  WARNING: Import failed: {resp.status_code} {resp.text[:300]}")
 
 
+def ensure_recommendations_index(es_url: str) -> None:
+    """Create the .mapping-recommendations index in ES if it doesn't exist.
+
+    Needed so the Kibana data view can discover the field schema
+    even before the gateway's recommendations loop has run.
+    """
+    from gateway.recommender import RECOMMENDATIONS_INDEX, RECOMMENDATIONS_INDEX_MAPPING
+
+    try:
+        resp = requests.head(f"{es_url}/{RECOMMENDATIONS_INDEX}")
+        if resp.status_code == 200:
+            print(f"  .mapping-recommendations index already exists")
+            return
+        resp = requests.put(
+            f"{es_url}/{RECOMMENDATIONS_INDEX}",
+            json=RECOMMENDATIONS_INDEX_MAPPING,
+            headers={"Content-Type": "application/json"},
+        )
+        if resp.status_code in (200, 201):
+            print(f"  Created .mapping-recommendations index")
+        else:
+            print(f"  WARNING: Failed to create .mapping-recommendations index: {resp.status_code} {resp.text[:200]}")
+    except requests.RequestException as exc:
+        print(f"  WARNING: Could not ensure .mapping-recommendations index: {exc}")
+
+
 def ensure_mapping_diff_index(es_url: str) -> None:
     """Create the .mapping-diff index in ES if it doesn't exist.
 
@@ -1576,6 +1793,7 @@ def main():
     from config import ES_HOST
     print("\nEnsuring ES indices...")
     ensure_mapping_diff_index(ES_HOST)
+    ensure_recommendations_index(ES_HOST)
 
     # --- Data Views (with fixed IDs so visualizations can reference them) ---
     print("\nCreating data views...")
@@ -1584,19 +1802,21 @@ def main():
     logs_dv_id = create_data_view(base, "logs*", "Logs", "dv-logs", time_field="timestamp")
     orders_dv_id = create_data_view(base, "orders*", "Orders", "dv-orders", time_field="order_date")
     diff_dv_id = create_data_view(base, ".mapping-diff", "Mapping Diff", "dv-mapping-diff", time_field="timestamp")
+    rec_dv_id = create_data_view(base, ".mapping-recommendations", "Recommendations", "dv-recommendations", time_field="timestamp")
 
     # --- Build and import all visualizations + dashboards ---
     print("\nImporting visualizations and dashboards...")
-    objects = build_saved_objects(products_dv_id, usage_dv_id, logs_dv_id, orders_dv_id, diff_dv_id)
+    objects = build_saved_objects(products_dv_id, usage_dv_id, logs_dv_id, orders_dv_id, diff_dv_id, rec_dv_id)
     import_objects(base, objects)
 
     print(f"\nDone! Open Kibana at {base}")
-    print(f"  Products:        {base}/app/dashboards#/view/products-explorer")
-    print(f"  Usage/Heat:      {base}/app/dashboards#/view/usage-heat")
-    print(f"  Multi-Index:     {base}/app/dashboards#/view/multi-index-comparison")
-    print(f"  Mapping Diff:    {base}/app/dashboards#/view/mapping-diff")
-    print(f"  Field Drill-Down:{base}/app/dashboards#/view/field-drilldown")
-    print(f"  Discover:        {base}/app/discover")
+    print(f"  Products:          {base}/app/dashboards#/view/products-explorer")
+    print(f"  Usage/Heat:        {base}/app/dashboards#/view/usage-heat")
+    print(f"  Multi-Index:       {base}/app/dashboards#/view/multi-index-comparison")
+    print(f"  Mapping Diff:      {base}/app/dashboards#/view/mapping-diff")
+    print(f"  Recommendations:   {base}/app/dashboards#/view/mapping-recommendations")
+    print(f"  Field Drill-Down:  {base}/app/dashboards#/view/field-drilldown")
+    print(f"  Discover:          {base}/app/discover")
 
 
 if __name__ == "__main__":

@@ -131,6 +131,16 @@ Compares index mappings against actual field usage observed through the gateway.
 - **Write strategy**: Delete-and-rewrite per index group. The `.mapping-diff` index stays small (one doc per field per group) so full rewrite is fast and avoids stale data.
 - **Refresh loop**: Runs every `MAPPING_DIFF_REFRESH_INTERVAL` seconds (default 300). Processes all known index groups from the metadata cache.
 
+### gateway/recommender.py — Mapping Recommendations Engine
+
+Reads field classification and mapping metadata from `.mapping-diff`, applies 8 decision rules, and writes actionable recommendations to `.mapping-recommendations`. Each recommendation includes a `why` (explanation + tradeoffs) and `how` (concrete mapping changes with JSON snippets).
+
+- **8 rules**: disable_index (write-only/sourced-only fields), disable_doc_values (queried but never aggregated/sorted), disable_norms (text field only filtered, never scored), change_to_keyword (text field only used with exact-match), add_keyword_subfield (text field needing both full-text and exact-match), remove_multifield (unused sub-field), remove_field (completely unused).
+- **Sibling awareness**: Rules 6 and 7 check the full set of fields in an index group (e.g., whether `title.keyword` already exists).
+- **Stacking**: Active fields can receive multiple recommendations (e.g., disable_norms + change_to_keyword).
+- **Write strategy**: Same delete-and-rewrite pattern as mapping_diff.
+- **Refresh loop**: Runs every `RECOMMENDATIONS_REFRESH_INTERVAL` seconds (default 300).
+
 ### gateway/ui.py — Control Panel
 
 Single-page HTML/JS control panel served at `/_gateway/ui`. Provides:
@@ -149,7 +159,7 @@ Exposed via `/_gateway/stats` and included in `/_gateway/health` responses.
 ### gateway/main.py — Application Entry Point
 
 FastAPI application that wires everything together:
-- Lifespan hook: creates usage index, starts metadata refresh, starts bulk writer, starts mapping diff loop, shuts down all httpx clients.
+- Lifespan hook: creates usage index, starts metadata refresh, starts bulk writer, starts mapping diff loop, starts recommendations loop, shuts down all httpx clients.
 - Gateway endpoints (`/_gateway/*`): health, stats, groups, sample-events, config, generate, UI.
 - Catch-all proxy route: observation pipeline for all other traffic with metrics instrumentation.
 - Shared httpx client (`_gw_client`) for gateway endpoints that query ES, avoiding per-request client creation.
@@ -178,6 +188,7 @@ All settings are read from environment variables with defaults for local develop
 | `METADATA_REFRESH_INTERVAL` | `60` | Metadata cache refresh (seconds) |
 | `MAPPING_DIFF_REFRESH_INTERVAL` | `300` | Mapping diff refresh interval (seconds) |
 | `MAPPING_DIFF_LOOKBACK_HOURS` | `168` | How far back to query usage events for mapping diff (hours, default 7 days) |
+| `RECOMMENDATIONS_REFRESH_INTERVAL` | `300` | Recommendations refresh interval (seconds) |
 | `GATEWAY_WORKERS` | `1` | Number of Uvicorn worker processes (set to CPU count for production) |
 | `BULK_FLUSH_SIZE` | `100` | Max events per bulk write batch |
 | `BULK_FLUSH_INTERVAL` | `0.5` | Max seconds between bulk flushes |
@@ -251,6 +262,24 @@ The `.mapping-diff` index stores one document per field per index group (latest 
 }
 ```
 
+## Mapping Recommendations Schema
+
+The `.mapping-recommendations` index stores one document per recommendation per field (refreshed every `RECOMMENDATIONS_REFRESH_INTERVAL` seconds):
+
+```json
+{
+  "timestamp": "2026-02-14T12:00:00Z",
+  "index_group": "products",
+  "field_name": "description",
+  "mapped_type": "text",
+  "classification": "write_only",
+  "recommendation": "disable_index",
+  "why": "This field is stored in the index but never queried...",
+  "how": "Update the index template mapping for this field:\n  \"description\": { \"type\": \"text\", \"index\": false, \"doc_values\": false }",
+  "breaking_change": false
+}
+```
+
 ## Failure Modes
 
 | Scenario | Behavior |
@@ -261,6 +290,7 @@ The `.mapping-diff` index stores one document per field per index group (latest 
 | Extractor can't parse body | Returns empty FieldRefs. Event still emitted with no field data. |
 | Usage index doesn't exist | Created automatically on gateway startup. |
 | Mapping diff refresh fails | Logged. Stale `.mapping-diff` data remains until next successful refresh. |
+| Recommendations refresh fails | Logged. Stale `.mapping-recommendations` data remains. Depends on `.mapping-diff` being populated first. |
 
 ## Safety Invariants
 
@@ -283,6 +313,7 @@ elastic_recommand/
     events.py            # Usage event model and emission
     metadata.py          # Index metadata cache (alias/data stream)
     mapping_diff.py      # Mapping vs. usage comparison engine
+    recommender.py       # Mapping recommendations engine (8 rules)
     metrics.py           # In-memory counters for monitoring
     ui.py                # Control panel HTML/JS
   generator/
@@ -294,6 +325,7 @@ elastic_recommand/
     test_events.py       # Fingerprinting and event building tests
     test_extractor.py    # Path parsing, DSL extraction, bulk, msearch
     test_mapping_diff.py # Mapping diff flattening, classification, and diff tests
+    test_recommender.py  # Recommendation rule tests
     test_metadata.py     # Group resolution tests
     test_metrics.py      # In-memory counter tests
     test_queries.py      # Query template and lookback tests
@@ -338,7 +370,7 @@ For the full tech stack evaluation (Kong, Go rewrite, and why we hardened Python
 - **Structured logging**: JSON-formatted logs for log aggregation systems.
 - **Metrics endpoint**: Prometheus/OpenTelemetry metrics for gateway health monitoring.
 - **Retention policy**: Auto-delete old usage events (ILM on `.usage-events`).
-- **Mapping recommendations**: Rule-based engine that turns mapping diff classifications into specific actionable changes (set `index: false`, remove multi-field, etc.).
+- **Index architecture recommendations**: Rule-based engine for rollover frequency, shard sizing, and index partitioning advice (requires `_stats` API polling).
 - **Multi-cluster support**: Proxy and observe traffic across multiple ES clusters.
 - **Authentication passthrough**: Forward auth headers and track per-user usage patterns.
 - **Alerting**: Notify when indices transition between tiers or when unused fields are detected.

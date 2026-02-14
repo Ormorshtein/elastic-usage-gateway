@@ -4,6 +4,42 @@ Reverse-chronological record of significant changes, decisions, and lessons lear
 
 ---
 
+## 2026-02-14 — Deliverable 6: Mapping Recommendations Engine
+
+Added an automated recommendation engine that turns mapping diff classifications into specific, actionable mapping changes. The recommender reads from `.mapping-diff`, applies 8 decision rules, and writes results to a new `.mapping-recommendations` index. Each recommendation includes a detailed **why** (explanation of the problem, tradeoffs, and risks) and **how** (concrete JSON mapping snippets and step-by-step instructions).
+
+**What changed:**
+- New `gateway/recommender.py` — 8 recommendation rules, background refresh loop, ES I/O
+- New `.mapping-recommendations` ES index (one doc per recommendation per field)
+- New Kibana "Mapping Recommendations" dashboard with 5 panels: overview markdown, recommendation count by type (horizontal bar), recommendations by index group (stacked bar), all recommendations table (with why/how columns), breaking changes table
+- New manual refresh endpoint: `POST /_gateway/recommendations/refresh`
+- New config var: `RECOMMENDATIONS_REFRESH_INTERVAL` (default 300s)
+
+**8 recommendation rules:**
+
+| Rule | Condition | Recommendation |
+|------|-----------|----------------|
+| 1 | Written but never read | `disable_index` — set `index: false, doc_values: false` |
+| 2 | Sourced only (fetched, never searched) | `disable_index` — set `index: false, doc_values: false` |
+| 3 | Queried/filtered, never aggregated/sorted | `disable_doc_values` |
+| 4 | Text field, filtered only (never scored) | `disable_norms` |
+| 5 | Text field, only exact-match usage | `change_to_keyword` (breaking change) |
+| 6 | Text field, needs both full-text and exact, no .keyword sub-field | `add_keyword_subfield` |
+| 7 | Unused multi-field (e.g., title.keyword with zero usage) | `remove_multifield` |
+| 8 | Completely unused field | `remove_field` |
+
+**Design decisions:**
+- Rules are independent — a field can receive multiple recommendations (e.g., disable_norms + change_to_keyword for a text field only used in filter context).
+- Non-active fields (write_only, sourced_only, unused) get exactly one recommendation and return early — no active-field rules apply.
+- The `why` and `how` columns use long-form text stored with `index: false` (display only, not searchable) to keep the index small.
+- Same background refresh pattern as mapping_diff.py — delete-and-rewrite per index group.
+
+**Files changed:** `gateway/recommender.py` (new), `tests/test_recommender.py` (new), `gateway/main.py`, `config.py`, `gateway/metrics.py`, `kibana_setup.py`, `ARCHITECTURE.md`, `ROADMAP.md`
+**Tests added:** 40 new (304 total)
+**Depends on:** Deliverable 5 (Mapping Diff)
+
+---
+
 ## 2026-02-13 — Field Drill-Down Dashboard
 
 Added a dedicated Kibana dashboard for per-field usage investigation. Instead of telling users to manually filter in Discover, the gateway now ships a ready-made "Field Drill-Down" dashboard with controls and pre-built panels.

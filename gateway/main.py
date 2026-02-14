@@ -2,16 +2,18 @@
 FastAPI application — the ES Usage Gateway entry point.
 
 Routes:
-  /_gateway/ui             — control panel UI (GET)
-  /_gateway/scenarios      — available scenarios (GET)
-  /_gateway/generate       — run query generator (POST)
-  /_gateway/events         — clear usage events (DELETE)
-  /_gateway/groups         — index groups with concrete indices (GET)
-  /_gateway/sample-events  — recent usage events (GET), ?index_group= filter
-  /_gateway/config         — query body storage config (GET/PATCH)
-  /_gateway/health         — gateway health check with ES connectivity (GET)
-  /_gateway/stats          — internal counters for monitoring (GET)
-  /{path:path}             — everything else proxied to Elasticsearch
+  /_gateway/ui                      — control panel UI (GET)
+  /_gateway/scenarios               — available scenarios (GET)
+  /_gateway/generate                — run query generator (POST)
+  /_gateway/events                  — clear usage events (DELETE)
+  /_gateway/groups                  — index groups with concrete indices (GET)
+  /_gateway/sample-events           — recent usage events (GET), ?index_group= filter
+  /_gateway/config                  — query body storage config (GET/PATCH)
+  /_gateway/health                  — gateway health check with ES connectivity (GET)
+  /_gateway/stats                   — internal counters for monitoring (GET)
+  /_gateway/mapping-diff/refresh    — trigger mapping diff refresh (POST)
+  /_gateway/recommendations/refresh — trigger recommendations refresh (POST)
+  /{path:path}                      — everything else proxied to Elasticsearch
 """
 
 import asyncio
@@ -33,6 +35,8 @@ from gateway import metadata as metadata_mod
 from gateway.metadata import close_metadata_client
 from gateway import mapping_diff as mapping_diff_mod
 from gateway.mapping_diff import close_diff_client
+from gateway import recommender as recommender_mod
+from gateway.recommender import close_recommendations_client
 from gateway import metrics
 import random
 from generator.queries import SCENARIOS
@@ -75,6 +79,11 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Could not ensure mapping diff index at startup — will retry on first refresh")
     mapping_diff_mod.start_diff_loop()
+    try:
+        await recommender_mod.ensure_recommendations_index()
+    except Exception:
+        logger.warning("Could not ensure recommendations index at startup — will retry on first refresh")
+    recommender_mod.start_recommendations_loop()
     logger.info("Gateway ready — proxying to Elasticsearch")
     yield
     logger.info("Gateway shutting down — closing clients")
@@ -82,6 +91,7 @@ async def lifespan(app: FastAPI):
     await close_proxy_client()
     await close_metadata_client()
     await close_diff_client()
+    await close_recommendations_client()
     await _gw_client.aclose()
 
 
@@ -148,6 +158,13 @@ async def reset_metrics():
 async def refresh_mapping_diff():
     """Trigger an immediate mapping diff refresh (instead of waiting for the next scheduled cycle)."""
     await mapping_diff_mod.refresh()
+    return {"status": "ok"}
+
+
+@app.post("/_gateway/recommendations/refresh")
+async def refresh_recommendations():
+    """Trigger an immediate recommendations refresh."""
+    await recommender_mod.refresh()
     return {"status": "ok"}
 
 

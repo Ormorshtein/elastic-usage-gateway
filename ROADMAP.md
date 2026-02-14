@@ -118,15 +118,19 @@ New panels in the "Query Patterns" section:
 ---
 
 ## Deliverable 6: Mapping Recommendations (Feature 4)
-**Status: [ ] NOT STARTED**
+**Status: [x] DONE (2026-02-14)**
 
-**Value:** 8 decision rules turn raw data into specific, actionable changes: "set `index: false`", "remove this multi-field", "change type to keyword". This is the output teams will actually act on.
+**Value:** 8 decision rules turn raw data into specific, actionable changes: "set `index: false`", "remove this multi-field", "change type to keyword". Each recommendation includes a detailed `why` (explanation + tradeoffs) and `how` (concrete JSON mapping snippets). This is the output teams actually act on.
 
 **Scope:**
-- New `gateway/recommender.py` with 8 rules (~280 lines)
-- Endpoint: `GET /_gateway/recommendations`
+- New `gateway/recommender.py` with 8 rules — reads `.mapping-diff`, writes to `.mapping-recommendations`
+- Background refresh loop (same pattern as mapping_diff.py)
+- New Kibana "Mapping Recommendations" dashboard with 5 panels
+- Manual refresh endpoint: `POST /_gateway/recommendations/refresh`
+- Each recommendation includes `why` and `how` long-form text columns
 
-**Files:** `gateway/recommender.py` (new), `gateway/analyzer.py`, `gateway/main.py`, tests
+**Files changed:** `gateway/recommender.py` (new), `tests/test_recommender.py` (new), `gateway/main.py`, `config.py`, `gateway/metrics.py`, `kibana_setup.py`
+**Tests added:** 40 new (304 total)
 **Depends on:** Deliverable 5 (Mapping Diff)
 
 ---
@@ -141,6 +145,32 @@ New panels in the "Query Patterns" section:
 - Wire into `script_fields`, `runtime_mappings`, `function_score`
 
 **Files:** `gateway/extractor.py`, tests
+
+---
+
+## Deliverable 8: Index Architecture Recommendations
+**Status: [ ] NOT STARTED**
+
+**Value:** D6 answers "how should this field be mapped?" but teams also need "how should this index be structured?" — rollover frequency, shard sizing, and index partitioning. Bad index architecture wastes more resources than bad field mappings. A 200GB daily index with 1 shard is as much of a problem as 50 unused indexed fields.
+
+**Scope:**
+- New `_stats` API polling: periodically fetch index size, doc count, shard count per index group
+- Results written to `.index-stats` ES index (same pattern as `.mapping-diff`)
+- Recommendation rules based on `_stats` data + existing lookback analysis from `.usage-events`:
+
+| Rule | Input data | Recommendation |
+|------|-----------|----------------|
+| Rollover too frequent | p95 lookback is 48h, indices are daily → queries span 2-3 indices | Switch to weekly rollover — fewer shards searched per query |
+| Rollover too infrequent | p95 lookback is 6h, indices are weekly → each query loads 7 days to read 6h | Switch to daily rollover — ES can skip irrelevant shards |
+| Shards too large | Shard size > 50GB | Increase shard count or roll over more frequently |
+| Shards too small | Shard size < 1GB and many shards | Reduce shard count or roll over less frequently — small shards waste cluster overhead |
+| Too many shards per index | Shard count > 5 and shard size < 10GB | Reduce `number_of_shards` in template |
+
+- New Kibana dashboard section or standalone dashboard with index-level sizing table + recommendations
+- Each recommendation includes `why` (explanation + tradeoffs) and `how` (concrete template/ILM changes)
+
+**Files:** `gateway/index_stats.py` (new), `kibana_setup.py`, `gateway/main.py`, `config.py`, tests
+**Depends on:** Lookback data from `.usage-events` (D1-D3), `_stats` API polling (new)
 
 ---
 
@@ -168,8 +198,9 @@ D3 (Templates) ✅
 D4 (Clients) ────────── standalone, can start now
 
 D5 (Mapping Diff) ✅
-D6 (Recommendations) ─ after D5 ✅ — ready to start
+D6 (Recommendations) ✅
 D7 (Painless) ───────── standalone, can start now
+D8 (Index Arch Recs) ── needs _stats polling (new) + lookback data (D1-D3)
 
 CI/CD Validation ───── after D3 + D4 + D5
 Alerting ───────────── after D3 + D5
@@ -179,3 +210,4 @@ Cost Attribution ───── after D3
 
 Deliverables 2, 3, 4, and 7 can all be built in parallel (no dependencies on each other).
 Deliverable 5 should follow because it unlocks the most downstream features.
+Deliverable 8 can start anytime — its only new dependency is `_stats` API polling, which is self-contained.

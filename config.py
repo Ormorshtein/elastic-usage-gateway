@@ -15,6 +15,7 @@ Environment variables:
   METADATA_REFRESH_INTERVAL      Metadata cache refresh interval (default: 60)
   MAPPING_DIFF_REFRESH_INTERVAL  Mapping diff refresh interval in seconds (default: 300)
   MAPPING_DIFF_LOOKBACK_HOURS    How far back to look for field usage (default: 168 = 7 days)
+  RECOMMENDATIONS_REFRESH_INTERVAL  Recommendations refresh interval in seconds (default: 300)
   EVENT_SAMPLE_RATE              Fraction of requests that emit events (default: 1.0)
   QUERY_BODY_ENABLED             Store query bodies in events (default: true)
   QUERY_BODY_SAMPLE_RATE         Fraction of events to store bodies (default: 1.0)
@@ -39,6 +40,7 @@ EVENT_TIMEOUT = float(os.getenv("EVENT_TIMEOUT", "10"))
 METADATA_REFRESH_INTERVAL = int(os.getenv("METADATA_REFRESH_INTERVAL", "60"))
 MAPPING_DIFF_REFRESH_INTERVAL = int(os.getenv("MAPPING_DIFF_REFRESH_INTERVAL", "300"))
 MAPPING_DIFF_LOOKBACK_HOURS = int(os.getenv("MAPPING_DIFF_LOOKBACK_HOURS", "168"))
+RECOMMENDATIONS_REFRESH_INTERVAL = int(os.getenv("RECOMMENDATIONS_REFRESH_INTERVAL", "300"))
 
 # --- Proxy ---
 PROXY_BODY_LIMIT = int(os.getenv("PROXY_BODY_LIMIT", str(1024 * 1024)))  # 1MB
