@@ -1081,3 +1081,118 @@ class TestScriptLangHandling:
         }}
         refs = extract_fields_from_search(body)
         assert refs.sourced == set()
+
+
+class TestHasPainlessDetection:
+    """Verify has_painless flag is set when Painless scripts extract fields."""
+
+    def test_no_scripts_is_false(self):
+        body = {"query": {"match": {"title": "laptop"}}}
+        refs = extract_fields_from_search(body)
+        assert refs.has_painless is False
+
+    def test_script_fields_sets_flag(self):
+        body = {"script_fields": {
+            "total": {"script": {"source": "doc['price'].value * 2"}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.has_painless is True
+
+    def test_runtime_mappings_sets_flag(self):
+        body = {"runtime_mappings": {
+            "day_of_week": {
+                "type": "keyword",
+                "script": {"source": "emit(doc['@timestamp'].value.dayOfWeekEnum.name())"},
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.has_painless is True
+
+    def test_function_score_script_sets_flag(self):
+        body = {"query": {"function_score": {
+            "query": {"match": {"title": "laptop"}},
+            "functions": [
+                {"script_score": {"script": {"source": "doc['popularity'].value * 2"}}},
+            ],
+        }}}
+        refs = extract_fields_from_search(body)
+        assert refs.has_painless is True
+
+    def test_scripted_sort_sets_flag(self):
+        body = {"sort": [
+            {"_script": {
+                "type": "number",
+                "script": {"source": "doc['priority'].value"},
+                "order": "desc",
+            }},
+        ]}
+        refs = extract_fields_from_search(body)
+        assert refs.has_painless is True
+
+    def test_scripted_metric_sets_flag(self):
+        body = {"aggs": {
+            "custom": {
+                "scripted_metric": {
+                    "init_script": "state.vals = []",
+                    "map_script": "state.vals.add(doc['amount'].value)",
+                    "combine_script": "return state.vals.sum()",
+                    "reduce_script": "return states.sum()",
+                },
+            },
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.has_painless is True
+
+    def test_bucket_script_sets_flag(self):
+        body = {"aggs": {
+            "sales": {"sum": {"field": "amount"}},
+            "ratio": {"bucket_script": {
+                "buckets_path": {"sales": "sales"},
+                "script": "doc['margin'].value / params.sales",
+            }},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.has_painless is True
+
+    def test_mustache_script_does_not_set_flag(self):
+        body = {"script_fields": {
+            "computed": {"script": {"lang": "mustache", "source": "{{field}}"}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.has_painless is False
+
+    def test_stored_script_does_not_set_flag(self):
+        body = {"script_fields": {
+            "val": {"script": {"id": "my_stored_script", "params": {"field": "price"}}},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.has_painless is False
+
+    def test_mixed_dsl_and_painless(self):
+        """A query with both regular DSL fields and a Painless script."""
+        body = {
+            "query": {"match": {"title": "laptop"}},
+            "script_fields": {
+                "margin": {"script": {"source": "doc['price'].value * 0.1"}},
+            },
+        }
+        refs = extract_fields_from_search(body)
+        assert refs.queried == {"title"}
+        assert refs.sourced == {"price"}
+        assert refs.has_painless is True
+
+    def test_msearch_propagates_painless_flag(self):
+        lines = [
+            '{"index": "products"}',
+            '{"query": {"match": {"title": "laptop"}}, "script_fields": {"x": {"script": {"source": "doc[\'price\'].value"}}}}',
+        ]
+        body = "\n".join(lines).encode()
+        refs = _extract_from_msearch(body)
+        assert refs.has_painless is True
+
+    def test_runtime_mapping_string_script_sets_flag(self):
+        body = {"runtime_mappings": {
+            "total": {"type": "double", "script": "emit(doc['price'].value * doc['qty'].value)"},
+        }}
+        refs = extract_fields_from_search(body)
+        assert refs.has_painless is True

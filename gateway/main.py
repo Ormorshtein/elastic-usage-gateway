@@ -339,6 +339,7 @@ async def generate(req: GenerateRequest):
             metrics.observe_es_time(elapsed_ms)
             idx_name = indices[0] if indices else None
             group = metadata_mod.resolve_group(idx_name) if idx_name else None
+            language = "dsl+painless" if field_refs.has_painless else "dsl"
             event = build_event(
                 index_name=idx_name,
                 operation=operation,
@@ -350,6 +351,7 @@ async def generate(req: GenerateRequest):
                 client_id="control-panel",
                 client_ip="127.0.0.1",
                 client_user_agent="gateway-generator",
+                language=language,
                 body=body_bytes,
                 index_group=group,
             )
@@ -430,6 +432,7 @@ async def proxy_fallback(request: Request):
     client_user_agent = request.headers.get("user-agent")
     idx = indices[0] if indices else None
     group = metadata_mod.resolve_group(idx) if idx else None
+    language = "dsl+painless" if field_refs.has_painless else "dsl"
     event = build_event(
         index_name=idx,
         operation=operation,
@@ -441,6 +444,7 @@ async def proxy_fallback(request: Request):
         client_id=client_id,
         client_ip=client_ip,
         client_user_agent=client_user_agent,
+        language=language,
         body=metadata["body"],
         index_group=group,
     )

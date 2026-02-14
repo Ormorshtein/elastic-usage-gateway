@@ -220,7 +220,7 @@ The `.usage-events` index stores one document per observed operation:
     "sourced": ["title", "price", "category"],
     "written": []
   },
-  "language": "dsl",
+  "language": "dsl",            // "dsl", "dsl+painless", or "sql" (future)
   "query_fingerprint": "a1b2c3...",
   "query_template_hash": "d4e5f6...",
   "query_template_text": "{\"query\": {\"bool\": {\"filter\": [{\"range\": {\"timestamp\": {\"gte\": \"?\"}}}], \"must\": [{\"match\": {\"title\": \"?\"}}]}}}",
@@ -359,7 +359,7 @@ For the full tech stack evaluation (Kong, Go rewrite, and why we hardened Python
 ## Known Limitations
 
 - **No authentication**: The gateway does not add auth headers. Designed for same-trust-zone deployment.
-- **No SQL/ES|QL query parsing**: Only DSL queries are analyzed. ES SQL and ES|QL queries pass through unobserved.
+- **No SQL/ES|QL query parsing**: Only DSL queries are analyzed. ES SQL and ES|QL queries pass through unobserved. The `language` field supports future SQL tagging.
 - **Partial Painless script coverage**: Fields accessed via `doc['field']` and `ctx._source.field` are extracted (~90% coverage). Fields stored in Painless variables or dynamically constructed names are not tracked.
 - **Partial msearch support**: msearch query bodies are parsed, but per-query index targeting from headers is not tracked.
 - **No streaming**: Large request/response bodies above 1MB are streamed, but observation (field extraction) only applies to buffered bodies below the threshold.

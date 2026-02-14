@@ -172,8 +172,12 @@ LINE_AXES = {
 _RAW_EVENTS_ONLY = "NOT type:rollup AND NOT type:_meta"
 
 
-def _control_group_input(data_view_id: str) -> tuple[dict, list[dict]]:
+def _control_group_input(data_view_id: str,
+                         include_language: bool = False) -> tuple[dict, list[dict]]:
     """Build a Kibana 8 native controlGroupInput for index_group filtering.
+
+    When include_language=True, adds a second control for the 'language' field
+    so users can filter by extraction source (dsl, dsl+painless, etc.).
 
     Returns (controlGroupInput dict, extra references list).
     """
@@ -194,6 +198,30 @@ def _control_group_input(data_view_id: str) -> tuple[dict, list[dict]]:
             },
         },
     }
+    refs = [
+        {"name": "controlGroup_0:optionsListDataView", "type": "index-pattern", "id": data_view_id},
+    ]
+
+    if include_language:
+        panels["1"] = {
+            "type": "optionsListControl",
+            "order": 1,
+            "width": "small",
+            "grow": False,
+            "explicitInput": {
+                "id": "1",
+                "fieldName": "language",
+                "title": "Language",
+                "selectedOptions": [],
+                "enhancements": {},
+                "singleSelect": False,
+                "searchTechnique": "prefix",
+            },
+        }
+        refs.append(
+            {"name": "controlGroup_1:optionsListDataView", "type": "index-pattern", "id": data_view_id},
+        )
+
     control_input = {
         "chainingSystem": "HIERARCHICAL",
         "controlStyle": "oneLine",
@@ -206,9 +234,6 @@ def _control_group_input(data_view_id: str) -> tuple[dict, list[dict]]:
         }),
         "panelsJSON": json.dumps(panels),
     }
-    refs = [
-        {"name": "controlGroup_0:optionsListDataView", "type": "index-pattern", "id": data_view_id},
-    ]
     return control_input, refs
 
 
@@ -349,7 +374,8 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "**Reading this section:**\n"
         "- **High-traffic index groups** (thousands of ops/hour) need adequate replicas and heap — check these first.\n"
         "- **Very low-traffic groups** (< 1 op/hour) are candidates for freezing or reducing replicas to save resources.\n"
-        "- Use the *Index Group* filter at the top to drill into a specific group.",
+        "- Use the *Index Group* filter at the top to drill into a specific group.\n"
+        "- Use the *Language* filter to isolate pure DSL queries (`dsl`) vs. queries containing Painless scripts (`dsl+painless`).",
     ))
     objects.append(_markdown(
         "md-header-field-heat-count", "Section: Field Heat by Count",
@@ -682,7 +708,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "type": "search",
         "attributes": {
             "title": "Usage Events — Raw Queries",
-            "columns": ["timestamp", "index_group", "operation", "client_id", "client_ip", "client_user_agent", "lookback_label", "path", "query_body", "response_status", "response_time_ms"],
+            "columns": ["timestamp", "index_group", "operation", "language", "client_id", "client_ip", "client_user_agent", "lookback_label", "path", "query_body", "response_status", "response_time_ms"],
             "sort": [["timestamp", "desc"]],
             "kibanaSavedObjectMeta": {
                 "searchSourceJSON": json.dumps({
@@ -835,7 +861,8 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "- **Index groups with disproportionately high traffic** relative to their data size may need more replicas or dedicated nodes.\n"
         "- **Groups with high avg response time** are candidates for query optimization, shard rebalancing, or mapping changes.\n"
         "- **Compare operation types per group** — a group dominated by writes may benefit from different refresh/flush settings than a read-heavy one.\n"
-        "- **Lookback differences** between groups inform per-group ILM policies — groups queried over short windows can move older data to cold tiers sooner.",
+        "- **Lookback differences** between groups inform per-group ILM policies — groups queried over short windows can move older data to cold tiers sooner.\n"
+        "- Use the *Language* filter to compare pure DSL traffic vs. queries containing Painless scripts.",
     ))
 
     objects.append(_markdown(
@@ -988,9 +1015,10 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "Investigate a specific field's usage: who queries it, when, with which query patterns, and how fast.\n\n"
         "**How to use this dashboard:**\n"
         "1. Select an **Index Group** to focus on one index.\n"
-        "2. Pick a field name in **one** of the category dropdowns (Queried, Filtered, or Aggregated) "
+        "2. Optionally filter by **Language** (`dsl` or `dsl+painless`) to isolate script-based queries.\n"
+        "3. Pick a field name in **one** of the category dropdowns (Queried, Filtered, or Aggregated) "
         "to filter to events that reference that field.\n"
-        "3. All panels below update to show only events matching your selection.\n\n"
+        "4. All panels below update to show only events matching your selection.\n\n"
         "**Cross-category search:** The dropdowns filter one category at a time. "
         "To find a field across ALL categories (queried + filtered + aggregated + sorted + sourced), "
         "use the KQL query bar at the top:\n\n"
@@ -1193,7 +1221,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     #   y=178: lookback distribution, lookback fields
     #   y=192: [header] Raw Events
     #   y=202: raw events table
-    control_input, control_refs = _control_group_input(usage_dv_id)
+    control_input, control_refs = _control_group_input(usage_dv_id, include_language=True)
     usage_panels = [
         # --- Section: Overview ---
         panel_ref(0,  "md-header-overview",          0,   0, 48, 10),
@@ -1296,7 +1324,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
     })
 
     # Multi-Index Comparison dashboard (using index_group native control)
-    comp_control_input, comp_control_refs = _control_group_input(usage_dv_id)
+    comp_control_input, comp_control_refs = _control_group_input(usage_dv_id, include_language=True)
     comparison_panels = [
         panel_ref(0, "md-header-multi-index",          0,  0, 48, 10),
         panel_ref(1, "vis-ops-by-index",               0, 10, 24, 14),
@@ -1629,6 +1657,21 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
                 "searchTechnique": "prefix",
             },
         },
+        "4": {
+            "type": "optionsListControl",
+            "order": 4,
+            "width": "small",
+            "grow": False,
+            "explicitInput": {
+                "id": "4",
+                "fieldName": "language",
+                "title": "Language",
+                "selectedOptions": [],
+                "enhancements": {},
+                "singleSelect": False,
+                "searchTechnique": "prefix",
+            },
+        },
     }
     drilldown_control_input = {
         "chainingSystem": "NONE",
@@ -1647,6 +1690,7 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         {"name": "controlGroup_1:optionsListDataView", "type": "index-pattern", "id": usage_dv_id},
         {"name": "controlGroup_2:optionsListDataView", "type": "index-pattern", "id": usage_dv_id},
         {"name": "controlGroup_3:optionsListDataView", "type": "index-pattern", "id": usage_dv_id},
+        {"name": "controlGroup_4:optionsListDataView", "type": "index-pattern", "id": usage_dv_id},
     ]
 
     drilldown_panels = [

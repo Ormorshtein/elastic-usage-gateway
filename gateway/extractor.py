@@ -93,6 +93,7 @@ class FieldRefs:
     sourced: set[str] = field(default_factory=set)
     written: set[str] = field(default_factory=set)
     lookback: LookbackInfo | None = None
+    has_painless: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -117,11 +118,12 @@ def _is_user_field(name: str) -> bool:
     return name not in _INTERNAL_FIELDS and not name.startswith("_")
 
 
-def _extract_script_fields(script_obj, target: set[str]) -> None:
+def _extract_script_fields(script_obj, target: set[str]) -> bool:
     """Extract field references from an ES script object into target set.
 
     Handles Painless (default) and Expression languages.
     Skips Mustache (template params) and stored scripts (no source available).
+    Returns True if any Painless field references were found.
     """
     if isinstance(script_obj, str):
         # Short-form: {"script": "doc['price'].value * 2"}
@@ -130,16 +132,19 @@ def _extract_script_fields(script_obj, target: set[str]) -> None:
         source = script_obj.get("source") or script_obj.get("inline", "")
         lang = script_obj.get("lang", "painless")
     else:
-        return
+        return False
 
     if not source or lang in ("mustache",):
-        return
+        return False
 
+    found = False
     for pattern in (_PAINLESS_DOC_SQ, _PAINLESS_DOC_DQ, _PAINLESS_CTX):
         for m in pattern.finditer(source):
             field = m.group(1)
             if _is_user_field(field):
                 target.add(field)
+                found = True
+    return found
 
 
 def _extract_query_fields(
@@ -233,7 +238,8 @@ def _extract_query_fields(
                 # script_score — Painless scoring script
                 script_score = func.get("script_score")
                 if isinstance(script_score, dict):
-                    _extract_script_fields(script_score.get("script"), target)
+                    if _extract_script_fields(script_score.get("script"), target):
+                        refs.has_painless = True
                 # field_value_factor — direct field reference
                 fvf = func.get("field_value_factor")
                 if isinstance(fvf, dict):
@@ -302,12 +308,16 @@ def _extract_agg_fields(aggs: dict, target: set[str], refs: FieldRefs | None = N
         scripted_metric = agg_def.get("scripted_metric")
         if isinstance(scripted_metric, dict):
             for script_key in ("init_script", "map_script", "combine_script", "reduce_script"):
-                _extract_script_fields(scripted_metric.get(script_key), target)
+                if _extract_script_fields(scripted_metric.get(script_key), target):
+                    if refs is not None:
+                        refs.has_painless = True
 
         for pipeline_type in ("bucket_script", "bucket_selector"):
             pipeline = agg_def.get(pipeline_type)
             if isinstance(pipeline, dict):
-                _extract_script_fields(pipeline.get("script"), target)
+                if _extract_script_fields(pipeline.get("script"), target):
+                    if refs is not None:
+                        refs.has_painless = True
 
         # Recurse into sub-aggregations
         for sub_key in ("aggs", "aggregations"):
@@ -316,7 +326,8 @@ def _extract_agg_fields(aggs: dict, target: set[str], refs: FieldRefs | None = N
                 _extract_agg_fields(sub_aggs, target, refs)
 
 
-def _extract_sort_fields(sort: list | dict, target: set[str]) -> None:
+def _extract_sort_fields(sort: list | dict, target: set[str],
+                         refs: FieldRefs | None = None) -> None:
     """Extract field names from sort clauses."""
     if isinstance(sort, dict):
         for field_name in sort:
@@ -329,7 +340,9 @@ def _extract_sort_fields(sort: list | dict, target: set[str]) -> None:
             elif isinstance(item, dict):
                 for field_name, sort_spec in item.items():
                     if field_name == "_script" and isinstance(sort_spec, dict):
-                        _extract_script_fields(sort_spec.get("script"), target)
+                        if _extract_script_fields(sort_spec.get("script"), target):
+                            if refs is not None:
+                                refs.has_painless = True
                     elif _is_user_field(field_name):
                         target.add(field_name)
 
@@ -370,7 +383,7 @@ def extract_fields_from_search(body: dict) -> FieldRefs:
 
     sort = body.get("sort")
     if sort:
-        _extract_sort_fields(sort, refs.sorted)
+        _extract_sort_fields(sort, refs.sorted, refs)
 
     source = body.get("_source")
     if source is not None:
@@ -428,7 +441,8 @@ def extract_fields_from_search(body: dict) -> FieldRefs:
     if isinstance(script_fields, dict):
         for _alias, spec in script_fields.items():
             if isinstance(spec, dict):
-                _extract_script_fields(spec.get("script"), refs.sourced)
+                if _extract_script_fields(spec.get("script"), refs.sourced):
+                    refs.has_painless = True
 
     # runtime_mappings — virtual fields defined at query time
     runtime_mappings = body.get("runtime_mappings")
@@ -437,9 +451,11 @@ def extract_fields_from_search(body: dict) -> FieldRefs:
             if isinstance(spec, dict):
                 script = spec.get("script")
                 if isinstance(script, dict):
-                    _extract_script_fields(script, refs.sourced)
+                    if _extract_script_fields(script, refs.sourced):
+                        refs.has_painless = True
                 elif isinstance(script, str):
-                    _extract_script_fields(script, refs.sourced)
+                    if _extract_script_fields(script, refs.sourced):
+                        refs.has_painless = True
 
     # Pick widest lookback window
     if lookbacks:
@@ -663,6 +679,9 @@ def _extract_from_msearch(body: bytes) -> FieldRefs:
                 refs.aggregated.update(query_refs.aggregated)
                 refs.sorted.update(query_refs.sorted)
                 refs.sourced.update(query_refs.sourced)
+                # Propagate painless flag
+                if query_refs.has_painless:
+                    refs.has_painless = True
                 # Keep widest lookback
                 if query_refs.lookback:
                     if refs.lookback is None or query_refs.lookback.seconds > refs.lookback.seconds:

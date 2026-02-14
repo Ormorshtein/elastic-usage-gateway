@@ -4,6 +4,24 @@ Reverse-chronological record of significant changes, decisions, and lessons lear
 
 ---
 
+## 2026-02-14 — Add Language Filter to Usage Dashboards (D7 follow-up)
+
+D7's Painless script extraction merged script-discovered fields silently into existing categories — users couldn't distinguish script-extracted fields from normal DSL fields. This adds a **Language** dropdown filter to all usage-based dashboards so users can filter by extraction source.
+
+**What changed:**
+- `FieldRefs.has_painless` boolean flag in `gateway/extractor.py` — set to `True` when `_extract_script_fields()` finds Painless field references
+- `gateway/main.py` now computes `language = "dsl+painless"` (when scripts detected) vs `"dsl"` (pure DSL) and passes it to `build_event()`
+- New **Language** `optionsListControl` added to 3 dashboards: Usage & Heat, Multi-Index Comparison, Field Drill-Down
+- Raw events saved search now includes `language` column
+- No schema change — the `language` keyword field already existed in `.usage-events`
+
+**Language values:** `"dsl"` (pure DSL), `"dsl+painless"` (DSL with Painless scripts), `"sql"` (future)
+
+**Files changed:** `gateway/extractor.py`, `gateway/main.py`, `kibana_setup.py`, `tests/test_extractor.py`, `CHANGELOG.md`, `ARCHITECTURE.md`
+**Tests added:** 12 new (343 total)
+
+---
+
 ## 2026-02-14 — Deliverable 7: Painless Script Field Extraction
 
 Closed the last major extraction blind spot. Fields accessed via Painless scripts (`doc['field']`, `ctx._source.field`) were previously invisible — the extractor now parses them from all DSL locations where scripts appear. This eliminates false "unused field" classifications and incorrect `remove_field` recommendations for script-dependent fields.
@@ -26,7 +44,7 @@ Closed the last major extraction blind spot. Fields accessed via Painless script
 
 **Design decisions:**
 - `function_score` also extracts non-script field references: `field_value_factor.field` and decay function fields (`gauss`, `linear`, `exp`) — these were previously untracked.
-- The `language` event field stays `"dsl"` — a DSL query containing a script is still DSL. The `language` field is reserved for truly different query languages (SQL, ES|QL).
+- ~~The `language` event field stays `"dsl"`~~ — Updated: events with Painless scripts now get `language: "dsl+painless"` (see follow-up entry above).
 - ~90% coverage — misses fields stored in Painless variables or dynamic field names (rare in practice).
 
 **Files changed:** `gateway/extractor.py`, `tests/test_extractor.py`, `CHANGELOG.md`, `ARCHITECTURE.md`, `ROADMAP.md`
