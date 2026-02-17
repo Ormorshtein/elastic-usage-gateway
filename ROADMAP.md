@@ -155,28 +155,33 @@ New panels in the "Query Patterns" section:
 ---
 
 ## Deliverable 8: Index Architecture Recommendations
-**Status: [ ] NOT STARTED**
+**Status: [x] DONE (2026-02-16)**
 
-**Value:** D6 answers "how should this field be mapped?" but teams also need "how should this index be structured?" — rollover frequency, shard sizing, and index partitioning. Bad index architecture wastes more resources than bad field mappings. A 200GB daily index with 1 shard is as much of a problem as 50 unused indexed fields.
+**Value:** D6 answers "how should this field be mapped?" but teams also need "how should this index be structured?" — shard sizing, replica settings, codec choices, mapping limits, and query-pattern-based optimizations. Bad index architecture wastes more resources than bad field mappings.
 
 **Scope:**
-- New `_stats` API polling: periodically fetch index size, doc count, shard count per index group
-- Results written to `.index-stats` ES index (same pattern as `.mapping-diff`)
-- Recommendation rules based on `_stats` data + existing lookback analysis from `.usage-events`:
+- New `gateway/index_arch.py` — 10 recommendation rules across 3 categories (shard_sizing, settings_audit, usage_based)
+- Data from `_cat/indices`, `_cat/shards`, `_settings`, `_mapping` (field count), and `.usage-events` (query patterns)
+- Results written to `.index-recommendations` ES index (one doc per recommendation per index group)
+- New Kibana "Index Architecture" dashboard with 6 panels + 3 filter controls (Index Group, Category, Severity)
+- Manual refresh endpoint: `POST /_gateway/index-arch/refresh`
 
-| Rule | Input data | Recommendation |
-|------|-----------|----------------|
-| Rollover too frequent | p95 lookback is 48h, indices are daily → queries span 2-3 indices | Switch to weekly rollover — fewer shards searched per query |
-| Rollover too infrequent | p95 lookback is 6h, indices are weekly → each query loads 7 days to read 6h | Switch to daily rollover — ES can skip irrelevant shards |
-| Shards too large | Shard size > 50GB | Increase shard count or roll over more frequently |
-| Shards too small | Shard size < 1GB and many shards | Reduce shard count or roll over less frequently — small shards waste cluster overhead |
-| Too many shards per index | Shard count > 5 and shard size < 10GB | Reduce `number_of_shards` in template |
+| # | Rule | Category | Condition |
+|---|------|----------|-----------|
+| 1 | `shard_too_small` | shard_sizing | Avg primary shard < 1GB, multiple shards |
+| 2 | `shard_too_large` | shard_sizing | Avg primary shard > 50GB (>100GB = critical) |
+| 3 | `replica_risk` | settings_audit | 0 replicas, not frozen tier |
+| 4 | `replica_waste` | settings_audit | >0 replicas on cold/frozen tier |
+| 5 | `codec_opportunity` | settings_audit | Default codec on read-only/warm/cold index |
+| 6 | `field_count_near_limit` | settings_audit | Field count > 80% of total_fields.limit |
+| 7 | `source_disabled` | settings_audit | _source.enabled: false |
+| 8 | `rollover_lookback_mismatch` | usage_based | p95 query lookback > 2x rollover period |
+| 9 | `index_sorting_opportunity` | usage_based | >70% of sorts on same field, index unsorted |
+| 10 | `refresh_interval_opportunity` | usage_based | Writes >> searches, default refresh_interval |
 
-- New Kibana dashboard section or standalone dashboard with index-level sizing table + recommendations
-- Each recommendation includes `why` (explanation + tradeoffs) and `how` (concrete template/ILM changes)
-
-**Files:** `gateway/index_stats.py` (new), `kibana_setup.py`, `gateway/main.py`, `config.py`, tests
-**Depends on:** Lookback data from `.usage-events` (D1-D3), `_stats` API polling (new)
+**Files changed:** `gateway/index_arch.py` (new), `tests/test_index_arch.py` (new), `gateway/main.py`, `config.py`, `gateway/metrics.py`, `gateway/metadata.py`, `kibana_setup.py`
+**Tests added:** 71 new (414 total)
+**Depends on:** Metadata cache (alias/data stream resolution), `.usage-events` (for usage-based rules)
 
 ---
 
@@ -206,7 +211,7 @@ D4 (Clients) ✅
 D5 (Mapping Diff) ✅
 D6 (Recommendations) ✅
 D7 (Painless) ✅
-D8 (Index Arch Recs) ── needs _stats polling (new) + lookback data (D1-D3)
+D8 (Index Arch Recs) ✅
 
 CI/CD Validation ───── after D3 ✅ + D4 ✅ + D5 ✅ → ready to start
 Alerting ───────────── after D3 ✅ + D5 ✅ → ready to start
@@ -214,5 +219,4 @@ Lineage ────────────── after D5 ✅ → ready to sta
 Cost Attribution ───── after D3 ✅ → ready to start
 ```
 
-Deliverables 1-7 are complete. D8 can start anytime — its only new dependency is `_stats` API polling, which is self-contained.
-All future deliverables (CI/CD Validation, Alerting, Lineage, Cost Attribution) have their prerequisites met.
+All 8 deliverables are complete. All future deliverables (CI/CD Validation, Alerting, Lineage, Cost Attribution) have their prerequisites met.

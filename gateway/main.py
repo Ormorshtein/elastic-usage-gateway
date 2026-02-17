@@ -13,6 +13,7 @@ Routes:
   /_gateway/stats                   — internal counters for monitoring (GET)
   /_gateway/mapping-diff/refresh    — trigger mapping diff refresh (POST)
   /_gateway/recommendations/refresh — trigger recommendations refresh (POST)
+  /_gateway/index-arch/refresh      — trigger index architecture recs refresh (POST)
   /{path:path}                      — everything else proxied to Elasticsearch
 """
 
@@ -37,6 +38,8 @@ from gateway import mapping_diff as mapping_diff_mod
 from gateway.mapping_diff import close_diff_client
 from gateway import recommender as recommender_mod
 from gateway.recommender import close_recommendations_client
+from gateway import index_arch as index_arch_mod
+from gateway.index_arch import close_index_arch_client
 from gateway import metrics
 import random
 from generator.queries import SCENARIOS
@@ -84,6 +87,11 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Could not ensure recommendations index at startup — will retry on first refresh")
     recommender_mod.start_recommendations_loop()
+    try:
+        await index_arch_mod.ensure_index_arch_index()
+    except Exception:
+        logger.warning("Could not ensure index arch index at startup — will retry on first refresh")
+    index_arch_mod.start_index_arch_loop()
     logger.info("Gateway ready — proxying to Elasticsearch")
     yield
     logger.info("Gateway shutting down — closing clients")
@@ -92,6 +100,7 @@ async def lifespan(app: FastAPI):
     await close_metadata_client()
     await close_diff_client()
     await close_recommendations_client()
+    await close_index_arch_client()
     await _gw_client.aclose()
 
 
@@ -165,6 +174,13 @@ async def refresh_mapping_diff():
 async def refresh_recommendations():
     """Trigger an immediate recommendations refresh."""
     await recommender_mod.refresh()
+    return {"status": "ok"}
+
+
+@app.post("/_gateway/index-arch/refresh")
+async def refresh_index_arch():
+    """Trigger an immediate index architecture recommendations refresh."""
+    await index_arch_mod.refresh()
     return {"status": "ok"}
 
 

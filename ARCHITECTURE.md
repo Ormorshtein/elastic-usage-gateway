@@ -143,6 +143,19 @@ Reads field classification and mapping metadata from `.mapping-diff`, applies 8 
 - **Write strategy**: Same delete-and-rewrite pattern as mapping_diff.
 - **Refresh loop**: Runs every `RECOMMENDATIONS_REFRESH_INTERVAL` seconds (default 300).
 
+### gateway/index_arch.py — Index Architecture Recommendations Engine
+
+Evaluates index-level structural design (shard sizing, settings, usage patterns) and writes recommendations to `.index-recommendations`. Follows the same three-tier architecture as `recommender.py`: pure functions (rule evaluation) → async I/O (ES data collection) → background lifecycle (refresh loop).
+
+- **10 rules in 3 categories**:
+  - **shard_sizing** (2 rules): `shard_too_small` (< 1GB with multiple shards), `shard_too_large` (> 50GB, critical at > 100GB).
+  - **settings_audit** (5 rules): `replica_risk` (0 replicas), `replica_waste` (replicas on cold/frozen), `codec_opportunity` (default LZ4 on read-only data), `field_count_near_limit` (approaching `total_fields.limit`), `source_disabled` (`_source.enabled: false`).
+  - **usage_based** (3 rules): `rollover_lookback_mismatch` (p95 lookback > 2x rollover period), `index_sorting_opportunity` (dominant sort field, index unsorted), `refresh_interval_opportunity` (write-heavy with default 1s refresh).
+- **Data collection**: 3 global API calls (`_cat/indices`, `_cat/shards`, `_settings`) partitioned in Python by index group via the metadata cache. Per-group: mapping field count check + `.usage-events` aggregation.
+- **Explainable output**: Every recommendation includes `current_value` (observed data), `why` (problem + best practice), `how` (concrete API calls), `reference_url` (Elastic docs link).
+- **Write strategy**: Same delete-and-rewrite per index group pattern as recommender.py.
+- **Refresh loop**: Runs every `INDEX_ARCH_REFRESH_INTERVAL` seconds (default 600).
+
 ### gateway/ui.py — Control Panel
 
 Single-page HTML/JS control panel served at `/_gateway/ui`. Provides:
@@ -161,7 +174,7 @@ Exposed via `/_gateway/stats` and included in `/_gateway/health` responses.
 ### gateway/main.py — Application Entry Point
 
 FastAPI application that wires everything together:
-- Lifespan hook: creates usage index, starts metadata refresh, starts bulk writer, starts mapping diff loop, starts recommendations loop, shuts down all httpx clients.
+- Lifespan hook: creates usage index, starts metadata refresh, starts bulk writer, starts mapping diff loop, starts recommendations loop, starts index architecture loop, shuts down all httpx clients.
 - Gateway endpoints (`/_gateway/*`): health, stats, groups, sample-events, config, generate, UI.
 - Catch-all proxy route: observation pipeline for all other traffic with metrics instrumentation.
 - Shared httpx client (`_gw_client`) for gateway endpoints that query ES, avoiding per-request client creation.
@@ -191,6 +204,8 @@ All settings are read from environment variables with defaults for local develop
 | `MAPPING_DIFF_REFRESH_INTERVAL` | `300` | Mapping diff refresh interval (seconds) |
 | `MAPPING_DIFF_LOOKBACK_HOURS` | `168` | How far back to query usage events for mapping diff (hours, default 7 days) |
 | `RECOMMENDATIONS_REFRESH_INTERVAL` | `300` | Recommendations refresh interval (seconds) |
+| `INDEX_ARCH_REFRESH_INTERVAL` | `600` | Index architecture recs refresh interval (seconds) |
+| `INDEX_ARCH_LOOKBACK_HOURS` | `168` | How far back to query usage events for index arch rules (hours, default 7 days) |
 | `GATEWAY_WORKERS` | `1` | Number of Uvicorn worker processes (set to CPU count for production) |
 | `BULK_FLUSH_SIZE` | `100` | Max events per bulk write batch |
 | `BULK_FLUSH_INTERVAL` | `0.5` | Max seconds between bulk flushes |
@@ -282,6 +297,25 @@ The `.mapping-recommendations` index stores one document per recommendation per 
 }
 ```
 
+## Index Architecture Recommendations Schema
+
+The `.index-recommendations` index stores one document per recommendation per index group (refreshed every `INDEX_ARCH_REFRESH_INTERVAL` seconds):
+
+```json
+{
+  "timestamp": "2026-02-16T12:00:00Z",
+  "index_group": "logs",
+  "category": "shard_sizing",
+  "recommendation": "shard_too_small",
+  "severity": "warning",
+  "current_value": "Avg primary shard size: 128.5 MB across 5 shards",
+  "why": "Primary shards average 128.5 MB — well below the recommended 10-50 GB sweet spot. Each shard consumes heap, file descriptors, and cluster state regardless of size...",
+  "how": "Reduce the number of primary shards in the index template:\nPUT /_index_template/logs\n{\"index_patterns\": [\"logs-*\"], \"template\": {\"settings\": {\"number_of_shards\": 1}}}",
+  "reference_url": "https://www.elastic.co/guide/en/elasticsearch/reference/current/size-your-shards.html",
+  "breaking_change": false
+}
+```
+
 ## Failure Modes
 
 | Scenario | Behavior |
@@ -293,6 +327,7 @@ The `.mapping-recommendations` index stores one document per recommendation per 
 | Usage index doesn't exist | Created automatically on gateway startup. |
 | Mapping diff refresh fails | Logged. Stale `.mapping-diff` data remains until next successful refresh. |
 | Recommendations refresh fails | Logged. Stale `.mapping-recommendations` data remains. Depends on `.mapping-diff` being populated first. |
+| Index arch refresh fails | Logged. Stale `.index-recommendations` data remains until next successful refresh. |
 
 ## Safety Invariants
 
@@ -316,6 +351,7 @@ elastic_recommand/
     metadata.py          # Index metadata cache (alias/data stream)
     mapping_diff.py      # Mapping vs. usage comparison engine
     recommender.py       # Mapping recommendations engine (8 rules)
+    index_arch.py        # Index architecture recommendations (10 rules)
     metrics.py           # In-memory counters for monitoring
     ui.py                # Control panel HTML/JS
   generator/
@@ -328,6 +364,7 @@ elastic_recommand/
     test_extractor.py    # Path parsing, DSL extraction, bulk, msearch
     test_mapping_diff.py # Mapping diff flattening, classification, and diff tests
     test_recommender.py  # Recommendation rule tests
+    test_index_arch.py   # Index architecture rule tests
     test_metadata.py     # Group resolution tests
     test_metrics.py      # In-memory counter tests
     test_queries.py      # Query template and lookback tests
@@ -372,7 +409,6 @@ For the full tech stack evaluation (Kong, Go rewrite, and why we hardened Python
 - **Structured logging**: JSON-formatted logs for log aggregation systems.
 - **Metrics endpoint**: Prometheus/OpenTelemetry metrics for gateway health monitoring.
 - **Retention policy**: Auto-delete old usage events (ILM on `.usage-events`).
-- **Index architecture recommendations**: Rule-based engine for rollover frequency, shard sizing, and index partitioning advice (requires `_stats` API polling).
 - **Multi-cluster support**: Proxy and observe traffic across multiple ES clusters.
 - **Authentication passthrough**: Forward auth headers and track per-user usage patterns.
 - **Alerting**: Notify when indices transition between tiers or when unused fields are detected.

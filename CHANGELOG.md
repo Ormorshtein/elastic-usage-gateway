@@ -4,6 +4,46 @@ Reverse-chronological record of significant changes, decisions, and lessons lear
 
 ---
 
+## 2026-02-16 — Deliverable 8: Index Architecture Recommendations
+
+Added an automated index architecture recommendation engine that evaluates index-level structural design — shard sizing, replica settings, codec choices, mapping limits, and query-pattern-based optimizations. This expands beyond field-level recommendations (D6) to answer: "Is this index structured correctly?"
+
+**What changed:**
+- New `gateway/index_arch.py` — 10 recommendation rules across 3 categories, background refresh loop, ES I/O
+- New `.index-recommendations` ES index (one doc per recommendation per index group)
+- New Kibana "Index Architecture" dashboard with 6 panels: overview markdown, severity bar chart, category bar chart, recommendations by group (stacked by severity), all recommendations table (with current_value/why/how columns), critical & breaking items table
+- New manual refresh endpoint: `POST /_gateway/index-arch/refresh`
+- New config vars: `INDEX_ARCH_REFRESH_INTERVAL` (default 600s), `INDEX_ARCH_LOOKBACK_HOURS` (default 168h)
+
+**10 recommendation rules:**
+
+| # | Rule | Category | Severity | Condition |
+|---|------|----------|----------|-----------|
+| 1 | `shard_too_small` | shard_sizing | warning | Avg primary shard < 1GB and shard count > 1 |
+| 2 | `shard_too_large` | shard_sizing | warning/critical | Avg primary shard > 50GB (>100GB = critical) |
+| 3 | `replica_risk` | settings_audit | warning | 0 replicas, not frozen tier |
+| 4 | `replica_waste` | settings_audit | info | >0 replicas on cold/frozen tier |
+| 5 | `codec_opportunity` | settings_audit | info | Default codec (LZ4) on read-only or warm/cold index |
+| 6 | `field_count_near_limit` | settings_audit | warning/critical | Field count > 80% of `total_fields.limit` (>95% = critical) |
+| 7 | `source_disabled` | settings_audit | critical | `_source.enabled: false` (breaking_change=true) |
+| 8 | `rollover_lookback_mismatch` | usage_based | warning | p95 query lookback > 2x rollover period |
+| 9 | `index_sorting_opportunity` | usage_based | info | >70% of sorted queries use same field, index unsorted |
+| 10 | `refresh_interval_opportunity` | usage_based | info | Writes/hr > 10x searches/hr, refresh_interval is default 1s |
+
+**Data collection strategy:** 3 global API calls (`_cat/indices`, `_cat/shards`, `_settings`) partitioned in Python by index group, plus per-group mapping field count and usage stats queries against `.usage-events`.
+
+**Design decisions:**
+- Every recommendation is deeply explainable: `current_value` shows observed data with numbers, `why` explains the problem and cites best practices, `how` provides concrete API calls/JSON snippets, `reference_url` links to Elastic docs.
+- Rules 8-10 are unique to this gateway — they leverage actual query patterns from `.usage-events` that no other tool can observe.
+- Rollover frequency is inferred from creation date gaps (median) rather than parsing ILM policies — simpler, works regardless of rollover mechanism.
+- Reuses `flatten_mapping` from `mapping_diff.py` for field counting to avoid code duplication.
+
+**Files changed:** `gateway/index_arch.py` (new), `tests/test_index_arch.py` (new), `gateway/main.py`, `config.py`, `gateway/metrics.py`, `gateway/metadata.py`, `kibana_setup.py`, `ARCHITECTURE.md`, `ROADMAP.md`
+**Tests added:** 71 new (414 total)
+**Depends on:** Metadata cache (alias/data stream resolution), `.usage-events` (for usage-based rules)
+
+---
+
 ## 2026-02-14 — Add Language Filter to Usage Dashboards (D7 follow-up)
 
 D7's Painless script extraction merged script-discovered fields silently into existing categories — users couldn't distinguish script-extracted fields from normal DSL fields. This adds a **Language** dropdown filter to all usage-based dashboards so users can filter by extraction source.

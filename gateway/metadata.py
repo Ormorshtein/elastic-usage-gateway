@@ -121,6 +121,11 @@ def get_groups() -> dict[str, list[str]]:
     return {k: sorted(v) for k, v in _groups.items()}
 
 
+def get_index_to_group() -> dict[str, str]:
+    """Return the current index-to-group mapping (concrete_index → group_name)."""
+    return dict(_index_to_group)
+
+
 async def _refresh_loop() -> None:
     """Background loop that refreshes metadata periodically."""
     while True:

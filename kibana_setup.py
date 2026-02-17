@@ -12,6 +12,7 @@ Dashboards created:
   4. Mapping Diff            — field usage vs. mapping comparison (from .mapping-diff index)
   5. Mapping Recommendations — actionable optimization advice (from .mapping-recommendations index)
   6. Field Drill-Down        — per-field usage investigation (clients, templates, response time)
+  7. Index Architecture      — index-level structural recommendations (from .index-recommendations index)
 
 Usage:
     python kibana_setup.py
@@ -237,7 +238,7 @@ def _control_group_input(data_view_id: str,
     return control_input, refs
 
 
-def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, orders_dv_id: str, diff_dv_id: str = "dv-mapping-diff", rec_dv_id: str = "dv-recommendations") -> list[dict]:
+def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, orders_dv_id: str, diff_dv_id: str = "dv-mapping-diff", rec_dv_id: str = "dv-recommendations", arch_dv_id: str = "dv-index-arch") -> list[dict]:
     """Build all visualization + dashboard saved objects."""
     objects = []
 
@@ -1744,6 +1745,256 @@ def build_saved_objects(products_dv_id: str, usage_dv_id: str, logs_dv_id: str, 
         "references": drilldown_refs,
     })
 
+    # =========================================================
+    # INDEX ARCHITECTURE VISUALIZATIONS (from .index-recommendations)
+    # =========================================================
+
+    objects.append(_markdown(
+        "md-header-arch-overview", "Section: Index Architecture",
+        "## Index Architecture — Is Your Index Design Optimal?\n"
+        "Structural recommendations for index-level design: shard sizing, replica settings, "
+        "codec choices, mapping limits, and usage-based optimizations.\n\n"
+        "**Three categories of recommendations:**\n"
+        "- **shard_sizing** — Are your shards the right size? Too small (<1 GB) wastes heap and cluster state; "
+        "too large (>50 GB) slows recoveries and merges.\n"
+        "- **settings_audit** — Are your index settings correct? Checks replicas, codec, field limits, and `_source` configuration.\n"
+        "- **usage_based** — Unique to this gateway: compares actual query patterns against index configuration. "
+        "Detects rollover/lookback mismatches, index sorting opportunities, and refresh interval waste.\n\n"
+        "**How to use this dashboard:**\n"
+        "- Start with the **severity summary** — address `critical` items first (data loss risk or imminent failures).\n"
+        "- Filter by **Index Group** to focus on one index at a time.\n"
+        "- Read the `current_value` column to see the observed data, `why` for the problem explanation, "
+        "and `how` for the exact API calls to fix it.\n"
+        "- After applying a fix, re-run `POST /_gateway/index-arch/refresh` to verify the recommendation disappears.",
+    ))
+
+    ARCH_BAR_AXES = {
+        "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "left",
+                          "show": True, "style": {}, "scale": {"type": "linear"},
+                          "labels": {"show": True, "filter": True, "truncate": 100}, "title": {}}],
+        "valueAxes": [{"id": "ValueAxis-1", "name": "BottomAxis-1", "type": "value",
+                       "position": "bottom", "show": True, "style": {},
+                       "scale": {"type": "linear", "mode": "normal"},
+                       "labels": {"show": True, "rotate": 0, "filter": False, "truncate": 100},
+                       "title": {"text": "Recommendations"}}],
+    }
+
+    objects.append(_vis(
+        "vis-arch-by-severity", "Recommendations by Severity", "horizontal_bar",
+        {"type": "horizontal_bar", "grid": {"categoryLines": False}, **ARCH_BAR_AXES,
+         "seriesParams": [{"show": True, "type": "histogram", "mode": "normal",
+                           "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Count", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2,
+                           "showCircles": True}],
+         "addTooltip": True, "addLegend": False, "legendPosition": "right",
+         "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "severity", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+        ],
+        arch_dv_id,
+    ))
+
+    objects.append(_vis(
+        "vis-arch-by-category", "Recommendations by Category", "horizontal_bar",
+        {"type": "horizontal_bar", "grid": {"categoryLines": False}, **ARCH_BAR_AXES,
+         "seriesParams": [{"show": True, "type": "histogram", "mode": "normal",
+                           "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Count", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2,
+                           "showCircles": True}],
+         "addTooltip": True, "addLegend": False, "legendPosition": "right",
+         "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "category", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+        ],
+        arch_dv_id,
+    ))
+
+    objects.append(_vis(
+        "vis-arch-by-group", "Recommendations by Index Group", "horizontal_bar",
+        {"type": "horizontal_bar", "grid": {"categoryLines": False}, **ARCH_BAR_AXES,
+         "seriesParams": [{"show": True, "type": "histogram", "mode": "stacked",
+                           "valueAxis": "ValueAxis-1",
+                           "data": {"label": "Count", "id": "1"},
+                           "drawLinesBetweenPoints": True, "lineWidth": 2,
+                           "showCircles": True}],
+         "addTooltip": True, "addLegend": True, "legendPosition": "right",
+         "times": [], "addTimeMarker": False, "thresholdLine": {"show": False}},
+        [
+            {"id": "1", "enabled": True, "type": "count", "params": {}, "schema": "metric"},
+            {"id": "2", "enabled": True, "type": "terms",
+             "params": {"field": "index_group", "size": 20,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "segment"},
+            {"id": "3", "enabled": True, "type": "terms",
+             "params": {"field": "severity", "size": 10,
+                        "order": "desc", "orderBy": "1"},
+             "schema": "group"},
+        ],
+        arch_dv_id,
+    ))
+
+    # All Recommendations (Saved Search — expandable rows for long text)
+    objects.append({
+        "id": "search-arch-all",
+        "type": "search",
+        "attributes": {
+            "title": "All Recommendations",
+            "columns": ["index_group", "category", "recommendation", "severity", "current_value", "why", "how", "reference_url"],
+            "sort": [["timestamp", "desc"]],
+            "kibanaSavedObjectMeta": {
+                "searchSourceJSON": json.dumps({
+                    "index": arch_dv_id,
+                    "query": {"query": "", "language": "kuery"},
+                    "filter": [],
+                    "highlightAll": True,
+                    "version": True,
+                })
+            },
+        },
+        "references": [
+            {"id": arch_dv_id, "name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern"}
+        ],
+    })
+
+    # Critical & Breaking Items (Saved Search — filtered)
+    objects.append({
+        "id": "search-arch-critical",
+        "type": "search",
+        "attributes": {
+            "title": "Critical & Breaking Items",
+            "columns": ["index_group", "recommendation", "severity", "current_value", "why", "how", "reference_url"],
+            "sort": [["timestamp", "desc"]],
+            "kibanaSavedObjectMeta": {
+                "searchSourceJSON": json.dumps({
+                    "index": arch_dv_id,
+                    "query": {"query": "severity: critical OR breaking_change: true", "language": "kuery"},
+                    "filter": [],
+                    "highlightAll": True,
+                    "version": True,
+                })
+            },
+        },
+        "references": [
+            {"id": arch_dv_id, "name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern"}
+        ],
+    })
+
+    # Index Architecture dashboard
+    # Controls: Index Group, Category, Severity
+    arch_control_panels = {
+        "0": {
+            "type": "optionsListControl",
+            "order": 0,
+            "width": "medium",
+            "grow": True,
+            "explicitInput": {
+                "id": "0",
+                "fieldName": "index_group",
+                "title": "Index Group",
+                "selectedOptions": [],
+                "enhancements": {},
+                "singleSelect": False,
+                "searchTechnique": "prefix",
+            },
+        },
+        "1": {
+            "type": "optionsListControl",
+            "order": 1,
+            "width": "small",
+            "grow": False,
+            "explicitInput": {
+                "id": "1",
+                "fieldName": "category",
+                "title": "Category",
+                "selectedOptions": [],
+                "enhancements": {},
+                "singleSelect": False,
+                "searchTechnique": "prefix",
+            },
+        },
+        "2": {
+            "type": "optionsListControl",
+            "order": 2,
+            "width": "small",
+            "grow": False,
+            "explicitInput": {
+                "id": "2",
+                "fieldName": "severity",
+                "title": "Severity",
+                "selectedOptions": [],
+                "enhancements": {},
+                "singleSelect": False,
+                "searchTechnique": "prefix",
+            },
+        },
+    }
+    arch_control_input = {
+        "chainingSystem": "HIERARCHICAL",
+        "controlStyle": "oneLine",
+        "showApplySelections": False,
+        "ignoreParentSettingsJSON": json.dumps({
+            "ignoreFilters": False,
+            "ignoreQuery": False,
+            "ignoreTimerange": False,
+            "ignoreValidations": False,
+        }),
+        "panelsJSON": json.dumps(arch_control_panels),
+    }
+    arch_control_refs = [
+        {"name": "controlGroup_0:optionsListDataView", "type": "index-pattern", "id": arch_dv_id},
+        {"name": "controlGroup_1:optionsListDataView", "type": "index-pattern", "id": arch_dv_id},
+        {"name": "controlGroup_2:optionsListDataView", "type": "index-pattern", "id": arch_dv_id},
+    ]
+
+    arch_panels = [
+        panel_ref(0, "md-header-arch-overview",  0,  0, 48, 16),
+        panel_ref(1, "vis-arch-by-severity",      0, 16, 16, 14),
+        panel_ref(2, "vis-arch-by-category",     16, 16, 16, 14),
+        panel_ref(3, "vis-arch-by-group",        32, 16, 16, 14),
+        panel_ref(4, "search-arch-all",             0, 30, 48, 22),
+        panel_ref(5, "search-arch-critical",      0, 52, 48, 16),
+    ]
+    arch_refs = [
+        {"name": "panel_0", "type": "visualization", "id": "md-header-arch-overview"},
+        {"name": "panel_1", "type": "visualization", "id": "vis-arch-by-severity"},
+        {"name": "panel_2", "type": "visualization", "id": "vis-arch-by-category"},
+        {"name": "panel_3", "type": "visualization", "id": "vis-arch-by-group"},
+        {"name": "panel_4", "type": "search", "id": "search-arch-all"},
+        {"name": "panel_5", "type": "search", "id": "search-arch-critical"},
+    ] + arch_control_refs
+    objects.append({
+        "id": "index-architecture",
+        "type": "dashboard",
+        "attributes": {
+            "title": "Index Architecture — Is Your Index Design Optimal?",
+            "controlGroupInput": arch_control_input,
+            "panelsJSON": json.dumps(arch_panels),
+            "optionsJSON": json.dumps({
+                "useMargins": True, "syncColors": True, "syncCursor": True,
+                "syncTooltips": False, "hidePanelTitles": False,
+            }),
+            "timeRestore": True,
+            "timeTo": "now",
+            "timeFrom": "now-24h",
+            "kibanaSavedObjectMeta": {
+                "searchSourceJSON": json.dumps({
+                    "query": {"query": "", "language": "kuery"}, "filter": [],
+                })
+            },
+        },
+        "references": arch_refs,
+    })
+
     return objects
 
 
@@ -1822,6 +2073,32 @@ def ensure_mapping_diff_index(es_url: str) -> None:
         print(f"  WARNING: Could not ensure .mapping-diff index: {exc}")
 
 
+def ensure_index_arch_index(es_url: str) -> None:
+    """Create the .index-recommendations index in ES if it doesn't exist.
+
+    Needed so the Kibana data view can discover the field schema
+    even before the gateway's index arch loop has run.
+    """
+    from gateway.index_arch import INDEX_ARCH_INDEX, INDEX_ARCH_INDEX_MAPPING
+
+    try:
+        resp = requests.head(f"{es_url}/{INDEX_ARCH_INDEX}")
+        if resp.status_code == 200:
+            print(f"  .index-recommendations index already exists")
+            return
+        resp = requests.put(
+            f"{es_url}/{INDEX_ARCH_INDEX}",
+            json=INDEX_ARCH_INDEX_MAPPING,
+            headers={"Content-Type": "application/json"},
+        )
+        if resp.status_code in (200, 201):
+            print(f"  Created .index-recommendations index")
+        else:
+            print(f"  WARNING: Failed to create .index-recommendations index: {resp.status_code} {resp.text[:200]}")
+    except requests.RequestException as exc:
+        print(f"  WARNING: Could not ensure .index-recommendations index: {exc}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Setup Kibana dashboards")
     parser.add_argument("--kibana", default=KIBANA_URL, help="Kibana URL")
@@ -1838,6 +2115,7 @@ def main():
     print("\nEnsuring ES indices...")
     ensure_mapping_diff_index(ES_HOST)
     ensure_recommendations_index(ES_HOST)
+    ensure_index_arch_index(ES_HOST)
 
     # --- Data Views (with fixed IDs so visualizations can reference them) ---
     print("\nCreating data views...")
@@ -1847,10 +2125,11 @@ def main():
     orders_dv_id = create_data_view(base, "orders*", "Orders", "dv-orders", time_field="order_date")
     diff_dv_id = create_data_view(base, ".mapping-diff", "Mapping Diff", "dv-mapping-diff", time_field="timestamp")
     rec_dv_id = create_data_view(base, ".mapping-recommendations", "Recommendations", "dv-recommendations", time_field="timestamp")
+    arch_dv_id = create_data_view(base, ".index-recommendations", "Index Architecture", "dv-index-arch", time_field="timestamp")
 
     # --- Build and import all visualizations + dashboards ---
     print("\nImporting visualizations and dashboards...")
-    objects = build_saved_objects(products_dv_id, usage_dv_id, logs_dv_id, orders_dv_id, diff_dv_id, rec_dv_id)
+    objects = build_saved_objects(products_dv_id, usage_dv_id, logs_dv_id, orders_dv_id, diff_dv_id, rec_dv_id, arch_dv_id)
     import_objects(base, objects)
 
     print(f"\nDone! Open Kibana at {base}")
@@ -1860,6 +2139,7 @@ def main():
     print(f"  Mapping Diff:      {base}/app/dashboards#/view/mapping-diff")
     print(f"  Recommendations:   {base}/app/dashboards#/view/mapping-recommendations")
     print(f"  Field Drill-Down:  {base}/app/dashboards#/view/field-drilldown")
+    print(f"  Index Arch:        {base}/app/dashboards#/view/index-architecture")
     print(f"  Discover:          {base}/app/discover")
 
 

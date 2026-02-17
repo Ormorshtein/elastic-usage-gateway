@@ -24,6 +24,8 @@ _counters = {
     "mapping_diff_refresh_failed": 0,
     "recommendations_refresh_ok": 0,
     "recommendations_refresh_failed": 0,
+    "index_arch_refresh_ok": 0,
+    "index_arch_refresh_failed": 0,
 }
 
 # Timing trackers: each has its own count so avg is independent of counters.
