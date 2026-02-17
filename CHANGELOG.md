@@ -4,6 +4,19 @@ Reverse-chronological record of significant changes, decisions, and lessons lear
 
 ---
 
+## 2026-02-17 — Codebase simplification: extract large modules
+
+Two refactors to reduce file sizes and improve navigability:
+
+**1. `index_arch.py` → `index_arch_text.py`** — Extracted all recommendation text (why/how/reference_url) into a `TEMPLATES` dict using `string.Template`. Rule functions now call `_build_rec()` instead of building dicts inline. `index_arch.py`: 1,617 → 1,150 lines (−29%). All 115 tests pass unchanged.
+
+**2. `kibana_setup.py` → `kibana_objects.py`** — Moved `build_saved_objects()` and its helpers (`_vis`, `_markdown`, `_control_group_input`, constants) into a dedicated file. `kibana_setup.py`: 2,150 → 233 lines. Now contains only orchestration (wait, create data views, import, main).
+
+**Files added:** `gateway/index_arch_text.py`, `kibana_objects.py`
+**Files changed:** `gateway/index_arch.py`, `kibana_setup.py`
+
+---
+
 ## 2026-02-17 — D8 Expansion: Index Architecture Rules 11-15
 
 Expanded the index architecture recommendation engine from 10 to 15 rules, adding translog safety, force merge detection, cluster-level shard counting, merge policy tuning, and document count limits.

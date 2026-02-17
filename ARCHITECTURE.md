@@ -48,7 +48,7 @@ This enables data-driven decisions about ILM (Index Lifecycle Management), mappi
 
 ### Heat & Recommendations (Kibana Dashboards)
 
-Field-level heat and recommendations are delivered directly in Kibana dashboard panels via guidance text in Markdown headers (see `kibana_setup.py`). Each dashboard section includes actionable advice:
+Field-level heat and recommendations are delivered directly in Kibana dashboard panels via guidance text in Markdown headers (see `kibana_objects.py`). Each dashboard section includes actionable advice:
 - **Overview**: Traffic tiers, index group prioritization
 - **Field Heat by Count**: Unused fields, source-only fields, aggregation optimization
 - **Field Heat by Response Time**: Slow-query fields, optimization priority
@@ -353,6 +353,7 @@ elastic_recommand/
     mapping_diff.py      # Mapping vs. usage comparison engine
     recommender.py       # Mapping recommendations engine (8 rules)
     index_arch.py        # Index architecture recommendations (15 rules)
+    index_arch_text.py   # Recommendation text templates (TEMPLATES dict)
     metrics.py           # In-memory counters for monitoring
     ui.py                # Control panel HTML/JS
   generator/
@@ -360,6 +361,8 @@ elastic_recommand/
     generate.py          # CLI traffic generator
     queries.py           # Scenario-based query templates
     seed.py              # Sample data seeder
+  kibana_objects.py      # Kibana saved object builders (visualizations + dashboards)
+  kibana_setup.py        # Kibana setup orchestration (data views, import, main)
   tests/
     test_events.py       # Fingerprinting and event building tests
     test_extractor.py    # Path parsing, DSL extraction, bulk, msearch
