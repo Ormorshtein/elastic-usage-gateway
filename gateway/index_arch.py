@@ -1,10 +1,11 @@
 """
 Index architecture recommendations engine — generates shard sizing,
-settings audit, and usage-based optimization advice.
+settings audit, usage-based, and cluster health optimization advice.
 
 Reads index metadata from ES APIs (_cat/indices, _cat/shards, _settings,
-_mapping) and query patterns from .usage-events, applies 10 decision rules,
-and writes recommendation documents to the .index-recommendations index.
+_mapping, _stats/segments) and query patterns from .usage-events, applies
+15 decision rules (14 per-group + 1 cluster-level), and writes
+recommendation documents to the .index-recommendations index.
 
 Each recommendation includes:
 - current_value: what we observed, with actual numbers
@@ -34,6 +35,7 @@ from config import (
 )
 from gateway import metadata as metadata_mod
 from gateway import metrics
+from gateway.index_arch_text import TEMPLATES
 from gateway.mapping_diff import flatten_mapping
 
 logger = logging.getLogger(__name__)
@@ -98,6 +100,60 @@ def _fmt_bytes(n: int) -> str:
     if n >= 1_000_000:
         return f"{n / 1_000_000:.0f}MB"
     return f"{n / 1_000:.0f}KB"
+
+
+def _parse_bytes_string(value: str | None) -> int | None:
+    """Parse an ES byte-size string like '5gb', '500mb' to bytes.
+
+    Returns None if the value is None or unparseable.
+    """
+    if not value:
+        return None
+    value = value.strip().lower()
+    multipliers = {
+        "tb": 1_000_000_000_000, "t": 1_000_000_000_000,
+        "gb": 1_000_000_000, "g": 1_000_000_000,
+        "mb": 1_000_000, "m": 1_000_000,
+        "kb": 1_000, "k": 1_000,
+        "b": 1,
+    }
+    for suffix, mult in multipliers.items():
+        if value.endswith(suffix):
+            num_part = value[:-len(suffix)]
+            try:
+                return int(float(num_part) * mult)
+            except (ValueError, TypeError):
+                return None
+    try:
+        return int(float(value))
+    except (ValueError, TypeError):
+        return None
+
+
+def _build_rec(
+    name: str, *, current_value: str, severity: str | None = None, **fmt,
+) -> dict:
+    """Assemble a recommendation dict from a template and dynamic values.
+
+    Args:
+        name: Key in TEMPLATES (e.g. "shard_too_small").
+        current_value: Always computed by the rule function.
+        severity: Override the template's default severity.
+        **fmt: Values substituted into Template strings ($var).
+    """
+    t = TEMPLATES[name]
+    why = t["why"]
+    how = t["how"]
+    return {
+        "category": t["category"],
+        "recommendation": name,
+        "severity": severity or t["severity"],
+        "current_value": current_value,
+        "why": why.substitute(fmt) if hasattr(why, "substitute") else why,
+        "how": how.substitute(fmt) if hasattr(how, "substitute") else how,
+        "reference_url": t["reference_url"],
+        "breaking_change": t["breaking_change"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +328,7 @@ def build_group_profile(
     mapping_field_count: int | None,
     source_enabled: bool,
     usage_stats: dict | None,
+    segment_counts: dict[str, int] | None = None,
 ) -> dict:
     """Build a normalized profile dict for one index group.
 
@@ -323,6 +380,31 @@ def build_group_profile(
         else:
             index_sort_field = [sort_field_raw]
 
+    # Translog durability (Rule 11)
+    translog_durability = flat_settings.get(
+        "index.translog.durability", "request",
+    )
+
+    # Merge policy (Rule 14)
+    max_merged_segment = flat_settings.get(
+        "index.merge.policy.max_merged_segment",
+    )
+
+    # Segment counts (Rule 12) — avg segments per primary shard
+    avg_segments_per_primary = 0
+    if segment_counts and primary_shard_count > 0:
+        group_segments = sum(
+            segment_counts.get(idx, 0) for idx in indices
+        )
+        avg_segments_per_primary = group_segments // primary_shard_count
+
+    # Max docs per primary shard (Rule 15)
+    max_docs_per_primary_shard = 0
+    for shard_row in primary_shards:
+        doc_count = _safe_int(shard_row.get("docs"), 0)
+        if doc_count > max_docs_per_primary_shard:
+            max_docs_per_primary_shard = doc_count
+
     # Rollover inference
     rollover_hours = estimate_rollover_hours(creation_dates)
 
@@ -358,6 +440,11 @@ def build_group_profile(
         "dominant_sort_pct": us.get("dominant_sort_pct"),
         "search_count": us.get("search_count", 0),
         "write_count": us.get("write_count", 0),
+        # Rules 11-15
+        "translog_durability": translog_durability,
+        "avg_segments_per_primary": avg_segments_per_primary,
+        "max_merged_segment": max_merged_segment,
+        "max_docs_per_primary_shard": max_docs_per_primary_shard,
     }
 
 
@@ -377,43 +464,10 @@ def check_shard_too_small(profile: dict) -> list[dict]:
 
     avg_str = _fmt_bytes(avg_bytes)
     total_str = _fmt_bytes(profile["total_primary_store_bytes"])
-    return [{
-        "category": "shard_sizing",
-        "recommendation": "shard_too_small",
-        "severity": "warning",
-        "current_value": (
-            f"{shard_count} primary shards x {avg_str} avg = {total_str} total"
-        ),
-        "why": (
-            f"This index group has {shard_count} primary shards averaging "
-            f"{avg_str} each. Elasticsearch recommends primary shards between "
-            "10GB and 50GB. Small shards increase cluster overhead — each "
-            "shard consumes memory for segment metadata, Lucene instances, "
-            "and thread pool slots regardless of data size. Many small shards "
-            "also increase query latency due to per-shard coordination "
-            "overhead.\n\n"
-            "If not addressed: cluster state grows unnecessarily, master node "
-            "is under more pressure, and heap usage increases linearly with "
-            "shard count."
-        ),
-        "how": (
-            "Option 1 — Reduce shard count in the index template:\n\n"
-            "  PUT _index_template/<template-name>\n"
-            '  { "template": { "settings": { "number_of_shards": 1 } } }\n\n'
-            "Option 2 — If using ILM with rollover, increase the rollover "
-            "max_primary_shard_size threshold so each index accumulates "
-            "more data before rolling.\n\n"
-            "Option 3 — For time-series indices, consider less frequent "
-            "rollover (e.g., weekly instead of daily).\n\n"
-            "Changes only affect new indices — existing small-shard indices "
-            "are unchanged. Use the Shrink API to consolidate existing indices."
-        ),
-        "reference_url": (
-            "https://www.elastic.co/guide/en/elasticsearch/reference/"
-            "current/size-your-shards.html"
-        ),
-        "breaking_change": False,
-    }]
+    return [_build_rec("shard_too_small",
+        current_value=f"{shard_count} primary shards x {avg_str} avg = {total_str} total",
+        shard_count=shard_count, avg_str=avg_str,
+    )]
 
 
 def check_shard_too_large(profile: dict) -> list[dict]:
@@ -425,44 +479,10 @@ def check_shard_too_large(profile: dict) -> list[dict]:
 
     avg_str = _fmt_bytes(avg_bytes)
     severity = "critical" if avg_bytes > 100_000_000_000 else "warning"
-    return [{
-        "category": "shard_sizing",
-        "recommendation": "shard_too_large",
-        "severity": severity,
-        "current_value": (
-            f"{shard_count} primary shards averaging {avg_str} each"
-        ),
-        "why": (
-            f"Primary shards average {avg_str}, exceeding the recommended "
-            "50GB maximum. Large shards cause slow recovery — when a node "
-            "fails, the entire shard must be copied to another node, which "
-            "can take hours for shards over 100GB. Search performance also "
-            "suffers because each search runs on a single thread per shard — "
-            "a giant shard cannot be parallelized. Force-merge and reindex "
-            "operations become very slow and I/O intensive.\n\n"
-            "If not addressed: node failures cause extended recovery times, "
-            "rolling restarts take much longer, and reindexing becomes "
-            "impractical."
-        ),
-        "how": (
-            "Option 1 — Enable ILM rollover with a size threshold:\n\n"
-            "  PUT _ilm/policy/<policy-name>\n"
-            '  { "policy": { "phases": { "hot": { "actions": {\n'
-            '    "rollover": { "max_primary_shard_size": "50gb" }\n'
-            "  } } } } }\n\n"
-            "Option 2 — Increase number_of_shards in the index template "
-            "to spread data across more (smaller) shards.\n\n"
-            "Option 3 — Use the Split API to split existing indices:\n\n"
-            "  POST /<index>/_split/<target-index>\n"
-            '  { "settings": { "index.number_of_shards": 2 } }\n\n'
-            "Note: The index must be read-only before splitting."
-        ),
-        "reference_url": (
-            "https://www.elastic.co/guide/en/elasticsearch/reference/"
-            "current/size-your-shards.html"
-        ),
-        "breaking_change": False,
-    }]
+    return [_build_rec("shard_too_large",
+        current_value=f"{shard_count} primary shards averaging {avg_str} each",
+        severity=severity, avg_str=avg_str,
+    )]
 
 
 def check_replica_risk(profile: dict) -> list[dict]:
@@ -473,37 +493,7 @@ def check_replica_risk(profile: dict) -> list[dict]:
     if "frozen" in tier:
         return []  # snapshot-backed, no replicas needed
 
-    return [{
-        "category": "settings_audit",
-        "recommendation": "replica_risk",
-        "severity": "warning",
-        "current_value": "0 replicas configured",
-        "why": (
-            "This index group has zero replicas. If a data node fails, any "
-            "shards on that node are lost until the node recovers. With 0 "
-            "replicas, there is no redundant copy — a disk failure or node "
-            "crash results in data loss. Additionally, search throughput "
-            "cannot be distributed across replica shards.\n\n"
-            "Zero replicas are acceptable during bulk loading, for indices "
-            "backed by searchable snapshots (frozen tier), or for data that "
-            "can be fully re-derived from an external source."
-        ),
-        "how": (
-            "Set number_of_replicas to 1 (or more for high-availability):\n\n"
-            "  PUT /<index>/_settings\n"
-            '  { "index": { "number_of_replicas": 1 } }\n\n'
-            "To set for all future indices, update the index template:\n\n"
-            "  PUT _index_template/<template-name>\n"
-            '  { "template": { "settings": { "number_of_replicas": 1 } } }\n\n'
-            "This takes effect immediately on existing indices — Elasticsearch "
-            "will start allocating replica shards."
-        ),
-        "reference_url": (
-            "https://www.elastic.co/guide/en/elasticsearch/reference/"
-            "current/index-modules.html#dynamic-index-number-of-replicas"
-        ),
-        "breaking_change": False,
-    }]
+    return [_build_rec("replica_risk", current_value="0 replicas configured")]
 
 
 def check_replica_waste(profile: dict) -> list[dict]:
@@ -515,36 +505,11 @@ def check_replica_waste(profile: dict) -> list[dict]:
         return []
 
     replicas = profile["number_of_replicas"]
-    return [{
-        "category": "settings_audit",
-        "recommendation": "replica_waste",
-        "severity": "info",
-        "current_value": (
-            f"{replicas} replica(s) on {tier.split(',')[0].replace('data_', '')} tier"
-        ),
-        "why": (
-            f"This index has {replicas} replica(s) but is on the "
-            f"{tier.split(',')[0].replace('data_', '')} tier. Indices on "
-            "cold/frozen tiers are backed by searchable snapshots — the "
-            "snapshot repository provides redundancy, making replicas "
-            "unnecessary. Each replica doubles storage requirements and "
-            "shard count without adding fault tolerance.\n\n"
-            "Removing replicas on cold/frozen tiers is safe and saves "
-            "significant disk space and cluster overhead."
-        ),
-        "how": (
-            "Set replicas to 0:\n\n"
-            "  PUT /<index>/_settings\n"
-            '  { "index": { "number_of_replicas": 0 } }\n\n'
-            "Elasticsearch will deallocate replica shards and free the "
-            "storage immediately."
-        ),
-        "reference_url": (
-            "https://www.elastic.co/docs/deploy-manage/tools/"
-            "snapshot-and-restore/searchable-snapshots"
-        ),
-        "breaking_change": False,
-    }]
+    tier_label = tier.split(",")[0].replace("data_", "")
+    return [_build_rec("replica_waste",
+        current_value=f"{replicas} replica(s) on {tier_label} tier",
+        replicas=replicas, tier_label=tier_label,
+    )]
 
 
 def check_codec_opportunity(profile: dict) -> list[dict]:
@@ -559,38 +524,10 @@ def check_codec_opportunity(profile: dict) -> list[dict]:
 
     total_str = _fmt_bytes(profile["total_primary_store_bytes"])
     reason = "read-only" if is_read_only else tier.split(",")[0].replace("data_", "") + " tier"
-    return [{
-        "category": "settings_audit",
-        "recommendation": "codec_opportunity",
-        "severity": "info",
-        "current_value": f"Default codec (LZ4) on {reason} index ({total_str})",
-        "why": (
-            "This index uses the default LZ4 codec but is no longer "
-            f"receiving writes ({reason}). Switching to best_compression "
-            "(DEFLATE) typically reduces index size by 15-25%. Since the "
-            "index is not being written to, the slower compression speed "
-            "has no impact. In some cases, best_compression actually "
-            "improves search performance because smaller data fits "
-            "better in the filesystem cache.\n\n"
-            "Note: Codec changes only apply to new segments. To apply "
-            "to existing data, force-merge after changing the codec."
-        ),
-        "how": (
-            "1. Update the codec setting:\n\n"
-            "  PUT /<index>/_settings\n"
-            '  { "index": { "codec": "best_compression" } }\n\n'
-            "2. Force-merge to rewrite segments with the new codec:\n\n"
-            "  POST /<index>/_forcemerge?max_num_segments=1\n\n"
-            "For future indices, set the codec in the index template:\n\n"
-            "  PUT _index_template/<template-name>\n"
-            '  { "template": { "settings": { "codec": "best_compression" } } }'
-        ),
-        "reference_url": (
-            "https://www.elastic.co/search-labs/blog/"
-            "improve-elasticsearch-performance-best-compression"
-        ),
-        "breaking_change": False,
-    }]
+    return [_build_rec("codec_opportunity",
+        current_value=f"Default codec (LZ4) on {reason} index ({total_str})",
+        reason=reason,
+    )]
 
 
 def check_field_count_near_limit(profile: dict) -> list[dict]:
@@ -607,43 +544,11 @@ def check_field_count_near_limit(profile: dict) -> list[dict]:
 
     severity = "critical" if ratio > 0.95 else "warning"
     pct = int(ratio * 100)
-    return [{
-        "category": "settings_audit",
-        "recommendation": "field_count_near_limit",
-        "severity": severity,
-        "current_value": f"{field_count} fields mapped out of {limit} limit ({pct}%)",
-        "why": (
-            f"This index has {field_count} mapped fields, which is {pct}% of "
-            f"the total_fields.limit ({limit}). If a new field is dynamically "
-            "mapped and the limit is exceeded, indexing requests will fail "
-            "with an error. High field counts also increase cluster state "
-            "size, slow down mapping updates, and consume more heap on every "
-            "node.\n\n"
-            "Common causes: dynamic mapping with semi-structured data, "
-            "flattening deeply nested JSON, or index templates that don't "
-            "restrict field creation. A single index with 30,000+ fields "
-            "can crash a cluster from mapping metadata overhead alone "
-            "(documented in Elastic's 'Six Ways to Crash Elasticsearch')."
-        ),
-        "how": (
-            "Option 1 — Switch to explicit mappings and disable dynamic:\n\n"
-            "  PUT /<index>/_mapping\n"
-            '  { "dynamic": "strict" }\n\n'
-            "Option 2 — Use the flattened field type for variable-key data "
-            "(labels, tags, user-defined metadata):\n\n"
-            '  "metadata": { "type": "flattened" }\n\n'
-            "Option 3 — Increase the limit (last resort):\n\n"
-            "  PUT /<index>/_settings\n"
-            '  { "index.mapping.total_fields.limit": 2000 }\n\n'
-            "Option 4 — Review unused fields with the Mapping Recommendations "
-            "dashboard and remove fields nobody uses."
-        ),
-        "reference_url": (
-            "https://www.elastic.co/docs/troubleshoot/elasticsearch/"
-            "mapping-explosion"
-        ),
-        "breaking_change": False,
-    }]
+    return [_build_rec("field_count_near_limit",
+        current_value=f"{field_count} fields mapped out of {limit} limit ({pct}%)",
+        severity=severity,
+        field_count=field_count, pct=pct, limit=limit,
+    )]
 
 
 def check_source_disabled(profile: dict) -> list[dict]:
@@ -651,43 +556,7 @@ def check_source_disabled(profile: dict) -> list[dict]:
     if profile["source_enabled"]:
         return []
 
-    return [{
-        "category": "settings_audit",
-        "recommendation": "source_disabled",
-        "severity": "critical",
-        "current_value": "_source: false",
-        "why": (
-            "This index has _source disabled. Without _source, Elasticsearch "
-            "cannot reindex data, run update_by_query, use highlights, or "
-            "access the original document in scripts. Crucially, Elasticsearch "
-            "version upgrades that require reindexing will fail — this index "
-            "becomes a dead end.\n\n"
-            "Elastic strongly recommends against disabling _source. The "
-            "storage savings are rarely worth the loss of functionality. "
-            "Consider synthetic _source (ES 8.4+) as an alternative that "
-            "saves storage while preserving reindex capability.\n\n"
-            "If not addressed: this index cannot be migrated to future ES "
-            "versions that require reindexing, and any data correction "
-            "requiring update_by_query is impossible."
-        ),
-        "how": (
-            "WARNING: Re-enabling _source requires creating a new index and "
-            "re-ingesting data from the original source (not reindex, since "
-            "_source is not available).\n\n"
-            "1. Create a new index template with _source enabled (the default):\n\n"
-            "  PUT _index_template/<template-name>\n"
-            '  { "template": { "mappings": { "_source": { "enabled": true } } } }\n\n'
-            "2. Re-ingest data from the original data pipeline.\n\n"
-            "For new indices, consider synthetic _source as a middle ground "
-            "(requires Enterprise license):\n\n"
-            '  "_source": { "mode": "synthetic" }'
-        ),
-        "reference_url": (
-            "https://www.elastic.co/guide/en/elasticsearch/reference/"
-            "current/mapping-source-field.html"
-        ),
-        "breaking_change": True,
-    }]
+    return [_build_rec("source_disabled", current_value="_source: false")]
 
 
 def check_rollover_lookback_mismatch(profile: dict) -> list[dict]:
@@ -715,48 +584,16 @@ def check_rollover_lookback_mismatch(profile: dict) -> list[dict]:
         if rollover_h < 48
         else f"{rollover_h / 24:.0f}d"
     )
-    return [{
-        "category": "usage_based",
-        "recommendation": "rollover_lookback_mismatch",
-        "severity": "warning",
-        "current_value": (
+    return [_build_rec("rollover_lookback_mismatch",
+        current_value=(
             f"Rollover ~{rollover_label}, "
             f"p95 query lookback {lookback_label} "
             f"(~{indices_hit:.0f} indices per query)"
         ),
-        "why": (
-            f"Indices roll over approximately every {rollover_label}, but "
-            f"95% of queries look back {lookback_label}. This means each "
-            f"query must search across ~{indices_hit:.0f} indices. Every "
-            "additional index adds shard coordination overhead — the query "
-            "coordinator must send requests to each shard, wait for all "
-            "responses, and merge results.\n\n"
-            "Reducing the number of indices per query improves search "
-            "latency, reduces thread pool pressure, and simplifies cluster "
-            "state. This is the single most impactful index architecture "
-            "optimization for time-series data.\n\n"
-            "This recommendation is based on actual query patterns observed "
-            "through the gateway, not theoretical thresholds."
-        ),
-        "how": (
-            "Option 1 — Increase the rollover time threshold so each index "
-            "covers a longer period:\n\n"
-            "  PUT _ilm/policy/<policy-name>\n"
-            '  { "policy": { "phases": { "hot": { "actions": {\n'
-            f'    "rollover": {{ "max_age": "{lookback_label}" }}\n'
-            "  } } } } }\n\n"
-            "Option 2 — Switch to size-based rollover to decouple index "
-            "lifespan from calendar time:\n\n"
-            '  "rollover": { "max_primary_shard_size": "50gb" }\n\n'
-            "Changes only affect new indices. Existing indices remain "
-            "as-is until they age out via ILM."
-        ),
-        "reference_url": (
-            "https://www.elastic.co/guide/en/elasticsearch/reference/"
-            "current/size-your-shards.html"
-        ),
-        "breaking_change": False,
-    }]
+        rollover_label=rollover_label,
+        lookback_label=lookback_label,
+        indices_hit=f"{indices_hit:.0f}",
+    )]
 
 
 def check_index_sorting_opportunity(profile: dict) -> list[dict]:
@@ -769,48 +606,10 @@ def check_index_sorting_opportunity(profile: dict) -> list[dict]:
         return []  # already sorted
 
     pct = int(dominant_pct * 100)
-    return [{
-        "category": "usage_based",
-        "recommendation": "index_sorting_opportunity",
-        "severity": "info",
-        "current_value": (
-            f"{pct}% of sorted queries use '{dominant_field}', "
-            f"index is unsorted"
-        ),
-        "why": (
-            f"{pct}% of queries with sort clauses on this index group sort "
-            f"by '{dominant_field}'. When an index is pre-sorted by this "
-            "field, Elasticsearch can terminate searches early — it finds "
-            "the top-N results without scanning every document. For sorted "
-            "queries, this can reduce search time dramatically. Pre-sorting "
-            "also improves compression because similar values are grouped "
-            "together, reducing disk usage.\n\n"
-            "Caveat: Index sorting slows write throughput by approximately "
-            "40-50% because documents must be sorted at flush and merge "
-            "time. This is best for indices with moderate write volume where "
-            "search performance is the priority.\n\n"
-            "This recommendation is based on actual sort patterns observed "
-            "through the gateway."
-        ),
-        "how": (
-            "Set index sorting in the index template (cannot be changed "
-            "on existing indices):\n\n"
-            "  PUT _index_template/<template-name>\n"
-            '  { "template": { "settings": {\n'
-            f'    "index.sort.field": "{dominant_field}",\n'
-            '    "index.sort.order": "desc"\n'
-            "  } } }\n\n"
-            "New indices created from this template will be pre-sorted. "
-            "The sort field must be a keyword, numeric, date, or boolean "
-            "type with doc_values enabled.\n\n"
-            "WARNING: This slows indexing by ~40-50%. Do not apply to "
-            "write-heavy indices where ingest speed is critical."
-        ),
-        "reference_url": (
-            "https://www.elastic.co/blog/index-sorting-elasticsearch-6-0"
-        ),
-        "breaking_change": False,
-    }]
+    return [_build_rec("index_sorting_opportunity",
+        current_value=f"{pct}% of sorted queries use '{dominant_field}', index is unsorted",
+        pct=pct, dominant_field=dominant_field,
+    )]
 
 
 def check_refresh_interval_opportunity(profile: dict) -> list[dict]:
@@ -827,47 +626,137 @@ def check_refresh_interval_opportunity(profile: dict) -> list[dict]:
     if refresh is not None and refresh not in ("1s", "1000ms"):
         return []  # already customized
 
-    return [{
-        "category": "usage_based",
-        "recommendation": "refresh_interval_opportunity",
-        "severity": "info",
-        "current_value": (
+    return [_build_rec("refresh_interval_opportunity",
+        current_value=(
             f"Refresh: {refresh or '1s (default)'} | "
             f"Writes: {write_count:,}/period | "
             f"Searches: {search_count:,}/period"
         ),
-        "why": (
-            "This index group receives significantly more writes than "
-            f"searches ({write_count:,} writes vs {search_count:,} searches "
-            "in the observation window). The default 1-second refresh "
-            "interval creates a new Lucene segment every second, which "
-            "increases indexing overhead and triggers frequent segment "
-            "merges. Since few searches are running, the near-real-time "
-            "freshness provided by 1s refresh is wasted.\n\n"
-            "Increasing the refresh interval to 30s can improve indexing "
-            "throughput by 20-30% and reduce segment merge pressure. "
-            "Elasticsearch automatically skips refreshes for indices that "
-            "haven't received a search in 30 seconds (search_idle), but "
-            "explicitly setting a longer interval is more predictable.\n\n"
-            "This recommendation is based on actual read/write ratios "
-            "observed through the gateway."
+        write_count=f"{write_count:,}",
+        search_count=f"{search_count:,}",
+    )]
+
+
+def check_translog_async(profile: dict) -> list[dict]:
+    """Rule 11: Translog durability set to async — risks data loss on crash."""
+    durability = profile.get("translog_durability", "request")
+    if durability != "async":
+        return []
+
+    return [_build_rec("translog_async",
+        current_value="index.translog.durability = async",
+    )]
+
+
+def check_force_merge_opportunity(profile: dict) -> list[dict]:
+    """Rule 12: Read-only index with many segments — force merge opportunity."""
+    if not profile.get("blocks_write"):
+        return []
+    avg_seg = profile.get("avg_segments_per_primary", 0)
+    if avg_seg <= 5:
+        return []
+    shard_count = profile["primary_shard_count"]
+    if shard_count == 0:
+        return []
+
+    total_str = _fmt_bytes(profile["total_primary_store_bytes"])
+    return [_build_rec("force_merge_opportunity",
+        current_value=(
+            f"Read-only index with ~{avg_seg} segments/shard "
+            f"({shard_count} primary shards, {total_str} total)"
         ),
-        "how": (
-            "Set a longer refresh interval:\n\n"
-            "  PUT /<index>/_settings\n"
-            '  { "index": { "refresh_interval": "30s" } }\n\n'
-            "For write-heavy ingest with batch processing, consider "
-            "disabling refresh entirely during bulk loads:\n\n"
-            '  { "index": { "refresh_interval": "-1" } }\n\n'
-            "Remember to restore a normal interval after bulk loading. "
-            "For future indices, set this in the index template."
+        avg_seg=avg_seg,
+    )]
+
+
+def check_node_shard_count(cat_shards_rows: list[dict]) -> list[dict]:
+    """Rule 13: Node-level shard count exceeding safe limits.
+
+    This is a cluster-level check (not per index group). Unlike other rules,
+    it takes raw _cat/shards data instead of a profile dict.
+
+    Returns recommendations for index_group="_cluster".
+    """
+    node_counts: dict[str, int] = {}
+    for row in cat_shards_rows:
+        node = row.get("node")
+        if not node or row.get("state") != "STARTED":
+            continue
+        node_counts[node] = node_counts.get(node, 0) + 1
+
+    results = []
+    for node, count in sorted(node_counts.items()):
+        if count <= 1000:
+            continue
+
+        severity = "critical" if count > 1500 else "warning"
+        impact_note = (
+            "CRITICAL: At >1,500 shards per node, cluster instability "
+            "becomes likely. Master node elections, cluster state "
+            "publications, and shard allocation decisions all degrade "
+            "significantly."
+            if count > 1500 else
+            "At this level, the node is approaching the danger zone. "
+            "Plan shard reduction before adding more indices."
+        )
+        results.append(_build_rec("node_shard_count",
+            current_value=f"Node '{node}' has {count:,} shards",
+            severity=severity,
+            node=node, count=f"{count:,}", impact_note=impact_note,
+        ))
+
+    return results
+
+
+def check_merge_policy_tuning(profile: dict) -> list[dict]:
+    """Rule 14: Large shards with default max_merged_segment (5GB)."""
+    avg_bytes = profile["avg_primary_shard_size_bytes"]
+    if avg_bytes < 50_000_000_000:  # 50GB
+        return []
+
+    max_seg_str = profile.get("max_merged_segment")
+    if max_seg_str is not None:
+        max_seg_bytes = _parse_bytes_string(max_seg_str)
+        if max_seg_bytes is not None and max_seg_bytes > 5_000_000_000:
+            return []  # already tuned above 5GB
+
+    avg_str = _fmt_bytes(avg_bytes)
+    return [_build_rec("merge_policy_tuning",
+        current_value=(
+            f"Avg shard size {avg_str} with max_merged_segment "
+            f"= {max_seg_str or '5gb (default)'}"
         ),
-        "reference_url": (
-            "https://www.elastic.co/guide/en/elasticsearch/reference/"
-            "current/tune-for-indexing-speed.html"
+        avg_str=avg_str,
+    )]
+
+
+def check_shard_docs_limit(profile: dict) -> list[dict]:
+    """Rule 15: Primary shard approaching 200M docs soft limit."""
+    max_docs = profile.get("max_docs_per_primary_shard", 0)
+    if max_docs <= 200_000_000:
+        return []
+
+    shard_count = profile["primary_shard_count"]
+    severity = "critical" if max_docs > 500_000_000 else "warning"
+    docs_label = f"{max_docs / 1_000_000:.0f}M"
+    impact_note = (
+        "CRITICAL: At >500M docs per shard, merge failures and "
+        "out-of-memory errors become increasingly likely during "
+        "segment merges."
+        if max_docs > 500_000_000 else
+        "At this document count, plan to reduce docs per shard "
+        "before the index grows further."
+    )
+    shard_target = max(shard_count * 2, 2)
+    return [_build_rec("shard_docs_limit",
+        current_value=(
+            f"Max docs per primary shard: {docs_label} "
+            f"({shard_count} primary shards)"
         ),
-        "breaking_change": False,
-    }]
+        severity=severity,
+        docs_label=docs_label, impact_note=impact_note,
+        shard_target=shard_target,
+    )]
 
 
 # ---------------------------------------------------------------------------
@@ -885,11 +774,18 @@ ALL_RULES = [
     check_rollover_lookback_mismatch,
     check_index_sorting_opportunity,
     check_refresh_interval_opportunity,
+    check_translog_async,
+    check_force_merge_opportunity,
+    check_merge_policy_tuning,
+    check_shard_docs_limit,
 ]
 
 
 def evaluate_all_rules(profile: dict) -> list[dict]:
-    """Run all 10 rules against a group profile.
+    """Run all 14 per-group rules against a group profile.
+
+    Rule 13 (check_node_shard_count) is a cluster-level check and runs
+    separately in refresh() — it is not included in ALL_RULES.
 
     Returns a list of recommendation dicts (may be empty if the group
     is well-configured).
@@ -954,7 +850,7 @@ async def fetch_cat_shards() -> list[dict] | None:
             params={
                 "format": "json",
                 "bytes": "b",
-                "h": "index,shard,prirep,state,docs,store",
+                "h": "index,shard,prirep,state,docs,store,node",
             },
         )
         if resp.status_code != 200:
@@ -988,6 +884,38 @@ async def fetch_all_settings() -> dict[str, dict] | None:
         return result
     except httpx.RequestError as exc:
         logger.warning("Failed to fetch _settings: %s", exc)
+        return None
+
+
+async def fetch_index_segment_counts() -> dict[str, int] | None:
+    """Fetch segment count per index for all non-system indices.
+
+    Uses the _stats/segments API which returns pre-aggregated counts
+    (much less data than _cat/segments which returns one row per segment).
+
+    Returns a dict mapping index name to primary segment count,
+    or None on failure.
+    """
+    try:
+        resp = await _client.get("/*,-.*/_stats/segments")
+        if resp.status_code != 200:
+            logger.warning(
+                "Failed to fetch _stats/segments: %s", resp.status_code,
+            )
+            return None
+        data = resp.json()
+        result = {}
+        for idx_name, idx_data in data.get("indices", {}).items():
+            count = _safe_int(
+                idx_data.get("primaries", {})
+                .get("segments", {})
+                .get("count"),
+                0,
+            )
+            result[idx_name] = count
+        return result
+    except httpx.RequestError as exc:
+        logger.warning("Failed to fetch _stats/segments: %s", exc)
         return None
 
 
@@ -1101,7 +1029,7 @@ async def refresh() -> None:
         logger.debug("No index groups known — skipping index arch refresh")
         return
 
-    # Phase 1: Global data collection (3 calls, not per group)
+    # Phase 1: Global data collection (4 calls, not per group)
     cat_indices = await fetch_cat_indices()
     cat_shards = await fetch_cat_shards()
     all_settings = await fetch_all_settings()
@@ -1110,6 +1038,9 @@ async def refresh() -> None:
         logger.warning("Could not fetch cluster data — skipping index arch refresh")
         metrics.inc("index_arch_refresh_failed")
         return
+
+    # Segment counts are optional — Rule 12 degrades gracefully if missing
+    segment_counts = await fetch_index_segment_counts()
 
     # Phase 2: Build index-to-group lookup and partition
     index_to_group = metadata_mod.get_index_to_group()
@@ -1153,6 +1084,7 @@ async def refresh() -> None:
             mapping_field_count=field_count,
             source_enabled=source_enabled,
             usage_stats=usage_stats,
+            segment_counts=segment_counts,
         )
 
         # Evaluate rules
@@ -1169,6 +1101,17 @@ async def refresh() -> None:
 
         await write_recommendation_docs(index_group, docs)
         processed += 1
+
+    # Phase 4: Cluster-level checks (not per group)
+    cluster_recs = check_node_shard_count(cat_shards)
+    cluster_docs = []
+    for rec in cluster_recs:
+        cluster_docs.append({
+            "timestamp": timestamp,
+            "index_group": "_cluster",
+            **rec,
+        })
+    await write_recommendation_docs("_cluster", cluster_docs)
 
     metrics.inc("index_arch_refresh_ok")
     logger.info(
