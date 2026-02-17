@@ -160,8 +160,8 @@ New panels in the "Query Patterns" section:
 **Value:** D6 answers "how should this field be mapped?" but teams also need "how should this index be structured?" — shard sizing, replica settings, codec choices, mapping limits, and query-pattern-based optimizations. Bad index architecture wastes more resources than bad field mappings.
 
 **Scope:**
-- New `gateway/index_arch.py` — 10 recommendation rules across 3 categories (shard_sizing, settings_audit, usage_based)
-- Data from `_cat/indices`, `_cat/shards`, `_settings`, `_mapping` (field count), and `.usage-events` (query patterns)
+- New `gateway/index_arch.py` — 15 recommendation rules across 4 categories (shard_sizing, settings_audit, usage_based, cluster_health)
+- Data from `_cat/indices`, `_cat/shards`, `_settings`, `_mapping` (field count), `_stats/segments`, and `.usage-events` (query patterns)
 - Results written to `.index-recommendations` ES index (one doc per recommendation per index group)
 - New Kibana "Index Architecture" dashboard with 6 panels + 3 filter controls (Index Group, Category, Severity)
 - Manual refresh endpoint: `POST /_gateway/index-arch/refresh`
@@ -178,9 +178,14 @@ New panels in the "Query Patterns" section:
 | 8 | `rollover_lookback_mismatch` | usage_based | p95 query lookback > 2x rollover period |
 | 9 | `index_sorting_opportunity` | usage_based | >70% of sorts on same field, index unsorted |
 | 10 | `refresh_interval_opportunity` | usage_based | Writes >> searches, default refresh_interval |
+| 11 | `translog_async` | settings_audit | Translog durability set to "async" |
+| 12 | `force_merge_opportunity` | settings_audit | Read-only index with >5 segments/shard |
+| 13 | `node_shard_count` | cluster_health | Node hosts >1000 shards (>1500 = critical) |
+| 14 | `merge_policy_tuning` | settings_audit | Avg shard >= 50GB with default max_merged_segment |
+| 15 | `shard_docs_limit` | shard_sizing | Primary shard >200M docs (>500M = critical) |
 
 **Files changed:** `gateway/index_arch.py` (new), `tests/test_index_arch.py` (new), `gateway/main.py`, `config.py`, `gateway/metrics.py`, `gateway/metadata.py`, `kibana_setup.py`
-**Tests added:** 71 new (414 total)
+**Tests added:** 115 total in test_index_arch.py
 **Depends on:** Metadata cache (alias/data stream resolution), `.usage-events` (for usage-based rules)
 
 ---

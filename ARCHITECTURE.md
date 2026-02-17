@@ -147,11 +147,12 @@ Reads field classification and mapping metadata from `.mapping-diff`, applies 8 
 
 Evaluates index-level structural design (shard sizing, settings, usage patterns) and writes recommendations to `.index-recommendations`. Follows the same three-tier architecture as `recommender.py`: pure functions (rule evaluation) → async I/O (ES data collection) → background lifecycle (refresh loop).
 
-- **10 rules in 3 categories**:
-  - **shard_sizing** (2 rules): `shard_too_small` (< 1GB with multiple shards), `shard_too_large` (> 50GB, critical at > 100GB).
-  - **settings_audit** (5 rules): `replica_risk` (0 replicas), `replica_waste` (replicas on cold/frozen), `codec_opportunity` (default LZ4 on read-only data), `field_count_near_limit` (approaching `total_fields.limit`), `source_disabled` (`_source.enabled: false`).
+- **15 rules in 4 categories** (14 per-group + 1 cluster-level):
+  - **shard_sizing** (3 rules): `shard_too_small` (< 1GB with multiple shards), `shard_too_large` (> 50GB, critical at > 100GB), `shard_docs_limit` (> 200M docs per shard, critical at > 500M).
+  - **settings_audit** (8 rules): `replica_risk` (0 replicas), `replica_waste` (replicas on cold/frozen), `codec_opportunity` (default LZ4 on read-only data), `field_count_near_limit` (approaching `total_fields.limit`), `source_disabled` (`_source.enabled: false`), `translog_async` (async translog durability), `force_merge_opportunity` (read-only with >5 segments/shard), `merge_policy_tuning` (>= 50GB shards with default 5GB max_merged_segment).
   - **usage_based** (3 rules): `rollover_lookback_mismatch` (p95 lookback > 2x rollover period), `index_sorting_opportunity` (dominant sort field, index unsorted), `refresh_interval_opportunity` (write-heavy with default 1s refresh).
-- **Data collection**: 3 global API calls (`_cat/indices`, `_cat/shards`, `_settings`) partitioned in Python by index group via the metadata cache. Per-group: mapping field count check + `.usage-events` aggregation.
+  - **cluster_health** (1 rule): `node_shard_count` (> 1000 shards per node, critical at > 1500). Runs after the per-group loop, writes with `index_group: "_cluster"`.
+- **Data collection**: 4 global API calls (`_cat/indices`, `_cat/shards`, `_settings`, `_stats/segments`) partitioned in Python by index group via the metadata cache. Per-group: mapping field count check + `.usage-events` aggregation.
 - **Explainable output**: Every recommendation includes `current_value` (observed data), `why` (problem + best practice), `how` (concrete API calls), `reference_url` (Elastic docs link).
 - **Write strategy**: Same delete-and-rewrite per index group pattern as recommender.py.
 - **Refresh loop**: Runs every `INDEX_ARCH_REFRESH_INTERVAL` seconds (default 600).
@@ -351,7 +352,7 @@ elastic_recommand/
     metadata.py          # Index metadata cache (alias/data stream)
     mapping_diff.py      # Mapping vs. usage comparison engine
     recommender.py       # Mapping recommendations engine (8 rules)
-    index_arch.py        # Index architecture recommendations (10 rules)
+    index_arch.py        # Index architecture recommendations (15 rules)
     metrics.py           # In-memory counters for monitoring
     ui.py                # Control panel HTML/JS
   generator/

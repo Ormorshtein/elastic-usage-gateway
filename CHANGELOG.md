@@ -4,6 +4,31 @@ Reverse-chronological record of significant changes, decisions, and lessons lear
 
 ---
 
+## 2026-02-17 — D8 Expansion: Index Architecture Rules 11-15
+
+Expanded the index architecture recommendation engine from 10 to 15 rules, adding translog safety, force merge detection, cluster-level shard counting, merge policy tuning, and document count limits.
+
+**5 new rules:**
+
+| # | Rule | Category | Severity | Condition |
+|---|------|----------|----------|-----------|
+| 11 | `translog_async` | settings_audit | warning | Translog durability set to "async" (data loss risk) |
+| 12 | `force_merge_opportunity` | settings_audit | info | Read-only index with >5 segments per primary shard |
+| 13 | `node_shard_count` | cluster_health | warning/critical | Node hosts >1000 shards (>1500 = critical) |
+| 14 | `merge_policy_tuning` | settings_audit | info | Avg shard >= 50GB with default 5GB max_merged_segment |
+| 15 | `shard_docs_limit` | shard_sizing | warning/critical | Primary shard >200M docs (>500M = critical) |
+
+**New data source:** `_stats/segments` API call added to Phase 1 for segment count per index. Graceful degradation — if the call fails, Rule 12 simply does not fire.
+
+**New category:** `cluster_health` for cluster-wide checks (not tied to a specific index group). Written with `index_group: "_cluster"`.
+
+**Architectural note:** Rule 13 is the first cluster-level rule — it runs after the per-group loop and checks node-level shard distribution from the already-fetched `_cat/shards` data (now including the `node` column).
+
+**Files changed:** `gateway/index_arch.py`, `tests/test_index_arch.py`, `kibana_setup.py`
+**Tests added:** ~44 new (115 total in test_index_arch.py)
+
+---
+
 ## 2026-02-16 — Deliverable 8: Index Architecture Recommendations
 
 Added an automated index architecture recommendation engine that evaluates index-level structural design — shard sizing, replica settings, codec choices, mapping limits, and query-pattern-based optimizations. This expands beyond field-level recommendations (D6) to answer: "Is this index structured correctly?"

@@ -395,32 +395,14 @@ async def clear_events():
     )
 
 
-# --- Fallback proxy route (matches everything not handled above) ---
-
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"])
-async def proxy_fallback(request: Request):
-    """
-    Proxy all traffic to Elasticsearch.
-
-    Flow:
-    1. Forward request to ES and get response
-    2. Extract metadata from request (index, operation, fields)
-    3. Build usage event
-    4. Emit event in background (fire-and-forget)
-    5. Return ES response to client
-    """
-    # Step 1: proxy
-    response, metadata = await proxy_request(request)
-    metrics.inc("requests_proxied")
-
-    if not metadata:
-        # Proxy failed (502) — no metadata to extract
-        metrics.inc("requests_failed")
-        return response
-
-    metrics.observe_es_time(metadata["elapsed_ms"])
-
-    # Step 2: extract (safe — never raises)
+async def _observe_request(
+    metadata: dict,
+    client_id: str | None,
+    client_ip: str | None,
+    client_user_agent: str | None,
+) -> None:
+    """Extract fields and emit a usage event. Runs as a background task
+    so the proxy response is returned to the client without delay."""
     try:
         indices, operation, field_refs = extract_from_request(
             path=metadata["path"],
@@ -430,22 +412,16 @@ async def proxy_fallback(request: Request):
     except Exception:
         logger.exception("Extraction failed for %s — skipping event", metadata["path"])
         metrics.inc("extraction_errors")
-        return response
+        return
 
-    # Skip events for internal operations (own usage index, ES system endpoints)
     if _should_skip_event(operation, indices):
         metrics.inc("events_skipped")
-        return response
+        return
 
-    # Step 2.5: sampling — probabilistically skip events to reduce ES load
     if not should_sample_event():
         metrics.inc("events_sampled_out")
-        return response
+        return
 
-    # Step 3+4: build and emit one event per query
-    client_id = request.headers.get("x-client-id")
-    client_ip = request.client.host if request.client else None
-    client_user_agent = request.headers.get("user-agent")
     idx = indices[0] if indices else None
     group = metadata_mod.resolve_group(idx) if idx else None
     language = "dsl+painless" if field_refs.has_painless else "dsl"
@@ -465,6 +441,40 @@ async def proxy_fallback(request: Request):
         index_group=group,
     )
     emit_event_background(event)
+
+
+# --- Fallback proxy route (matches everything not handled above) ---
+
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"])
+async def proxy_fallback(request: Request):
+    """
+    Proxy all traffic to Elasticsearch.
+
+    Flow:
+    1. Forward request to ES and get response
+    2. Return ES response to client immediately
+    3. In background: extract fields, build usage event, emit to bulk writer
+    """
+    # Step 1: proxy
+    response, metadata = await proxy_request(request)
+    metrics.inc("requests_proxied")
+
+    if not metadata:
+        # Proxy failed (502) — no metadata to extract
+        metrics.inc("requests_failed")
+        return response
+
+    metrics.observe_es_time(metadata["elapsed_ms"])
+
+    # Capture client info before returning response (Request object
+    # won't be available inside the background task).
+    client_id = request.headers.get("x-client-id")
+    client_ip = request.client.host if request.client else None
+    client_user_agent = request.headers.get("user-agent")
+
+    # Extract, build, and emit the usage event in the background so the
+    # client gets the ES response without waiting for our observation work.
+    asyncio.create_task(_observe_request(metadata, client_id, client_ip, client_user_agent))
 
     return response
 
