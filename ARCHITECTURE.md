@@ -18,12 +18,14 @@ This enables data-driven decisions about ILM (Index Lifecycle Management), mappi
                           │          Gateway (port 9301)         │
                           │                                     │
   Client / Generator ───► │  FastAPI catch-all ──► Proxy ──────►│──► Elasticsearch (9200)
+                          │       │                  │          │
+                          │       │             response ──────►│──► Client (immediate)
                           │       │                             │
-                          │       ▼                             │
+                          │       ▼  (asyncio background task)  │
                           │  Extractor (parse DSL/bulk/msearch) │
                           │       │                             │
                           │       ▼                             │
-                          │  Events (build + emit background)   │
+                          │  Events (build + enqueue to bulk)   │
                           │       │                             │
                           │       ▼                             │
                           │  .usage-events index ◄──────────────│
@@ -36,15 +38,16 @@ This enables data-driven decisions about ILM (Index Lifecycle Management), mappi
 
 ## Data Flow
 
-### Request Observation (proxy_catchall in main.py)
+### Request Observation (proxy_fallback in main.py)
 
 1. **Proxy**: Forward the request to ES, get response. Never block or modify.
-2. **Extract**: Parse path (index, operation) and body (field references from DSL/bulk/msearch).
-3. **Skip check**: Ignore internal operations (cluster, cat, nodes) and system indices (`.` prefix).
-4. **Sample check**: Probabilistically skip event emission based on `EVENT_SAMPLE_RATE` (reduces ES load in production).
-5. **Group**: Look up the logical group (alias or data stream) via metadata cache.
-6. **Emit**: Build a usage event document and emit it as a fire-and-forget background task.
-7. **Return**: Send the ES response to the client unchanged.
+2. **Return**: Send the ES response to the client immediately — zero observation overhead on the response path.
+3. **Background** (`_observe_request`, via `asyncio.create_task`):
+   - **Extract**: Parse path (index, operation) and body (field references from DSL/bulk/msearch).
+   - **Skip check**: Ignore internal operations (cluster, cat, nodes) and system indices (`.` prefix).
+   - **Sample check**: Probabilistically skip event emission based on `EVENT_SAMPLE_RATE` (reduces ES load in production).
+   - **Group**: Look up the logical group (alias or data stream) via metadata cache.
+   - **Emit**: Build a usage event document and enqueue it for the bulk writer.
 
 ### Heat & Recommendations (Kibana Dashboards)
 

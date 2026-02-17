@@ -4,6 +4,14 @@ Reverse-chronological record of significant changes, decisions, and lessons lear
 
 ---
 
+## 2026-02-18 — Non-blocking proxy: move extraction to background task
+
+Moved the entire observation pipeline (field extraction, skip/sample checks, event building, emission) out of the proxy response path and into an `asyncio.create_task` background task (`_observe_request`). Previously the client had to wait for DSL parsing to complete before receiving the ES response; now the response is returned immediately after ES responds.
+
+**Files changed:** `gateway/main.py`
+
+---
+
 ## 2026-02-17 — Codebase simplification: extract large modules
 
 Two refactors to reduce file sizes and improve navigability:
