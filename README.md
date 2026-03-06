@@ -1,315 +1,170 @@
-# ES Usage Gateway
-
-A reverse-proxy gateway for Elasticsearch that observes query traffic and computes index-level and field-level heat scores. Helps identify hot/warm/cold/unused indices and fields for ILM and mapping optimization.
-
-## Why This Exists
-
-Elasticsearch mappings accumulate fields over time. Teams add fields for new features, migrations, experiments — but rarely remove them. After a year, an index might have 200 mapped fields but only 40 are actively used. The other 160 are still **indexed** (inverted index built on every write), **stored as doc_values** (columnar storage allocated even if never sorted or aggregated), and **replicated** across every shard and replica. This is invisible waste — ES doesn't tell you "field X hasn't been queried in 6 months."
-
-**Why not just ask the team?** Because they don't know. The app has 15 microservices built by 8 teams over 3 years. No one person knows which fields are used by which service. Code search helps but misses dynamic queries, third-party integrations, and Kibana dashboards built by analysts.
-
-**Why a proxy instead of log parsing?** ES slow logs only capture slow queries, not all queries. Application logs require every team to instrument. A proxy captures everything at the infrastructure layer — zero code changes, works for any client (apps, Kibana, curl).
-
-**The payoff:**
-- Set `"index": false` on unused fields → faster indexing, less disk
-- Set `"doc_values": false` on fields that are queried but never sorted/aggregated → less memory
-- Identify cold indices for ILM tiering → move to cheaper storage
-- Validate mapping changes before deploy → "this field is queried 10k times/hour, don't remove it"
-
-In short: **you can't optimize what you don't measure**, and nobody in the ES ecosystem measures field-level usage from real traffic. That's the gap this project fills.
-
-## Architecture
-
-```
-Query Generator --> Gateway (port 9301) --> Elasticsearch (port 9200)
-                       |
-                       +---> .usage-events index --> Heat Analyzer
-```
-
-For detailed architecture documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
-
-## How It Works
-
-The gateway sits between your application and Elasticsearch as a transparent proxy. Every query that passes through is **observed but never modified** — the gateway parses the Elasticsearch Query DSL to extract which fields are being used and how.
-
-### Extraction Example
-
-When a search request like this passes through the gateway:
-
-```
-POST /products/_search
-```
-```json
-{
-  "query": {
-    "bool": {
-      "must": [
-        { "match": { "title": "wireless headphones" } }
-      ],
-      "filter": [
-        { "term": { "category": "electronics" } },
-        { "range": { "price": { "gte": 20, "lte": 100 } } }
-      ]
-    }
-  },
-  "aggs": {
-    "by_brand": { "terms": { "field": "brand" } },
-    "avg_rating": { "avg": { "field": "rating" } }
-  },
-  "sort": [{ "price": "desc" }],
-  "_source": ["title", "price", "brand"]
-}
-```
-
-The gateway extracts field usage into categories:
+# Applicative Load Observability — Elastic Usage Gateway
 
-| Category | Fields | Meaning |
-|----------|--------|---------|
-| **queried** | `title` | Used in `match`, `term`, `multi_match`, etc. |
-| **filtered** | `category`, `price` | Used inside `bool.filter` context |
-| **aggregated** | `brand`, `rating` | Used in aggregations (`terms`, `avg`, etc.) |
-| **sorted** | `price` | Used in `sort` clauses |
-| **sourced** | `title`, `price`, `brand` | Returned in `_source` |
+**Product specification & vision**
 
-This produces a usage event stored in `.usage-events`:
-
-```json
-{
-  "timestamp": "2026-02-08T12:00:00Z",
-  "index": "products",
-  "index_group": "products",
-  "operation": "search",
-  "fields": {
-    "queried": ["title"],
-    "filtered": ["category", "price"],
-    "aggregated": ["brand", "rating"],
-    "sorted": ["price"],
-    "sourced": ["brand", "price", "title"],
-    "written": []
-  },
-  "response_time_ms": 42.5,
-  "response_status": 200
-}
-```
+---
 
-Over time, these events accumulate and the **heat analyzer** computes proportional field heat: if `title` appears in 30% of all field references for the `products` index, it's classified as **hot**. If `legacy_supplier_code` never appears, it's **unused** — a candidate for `"index": false` to save disk and indexing cost.
+## 1. Product Overview
 
-The extractor also handles:
-- **Bulk requests** (`_bulk`): extracts written fields from index/create/update actions, including unwrapping `doc`/`upsert` wrappers
-- **Multi-search** (`_msearch`): parses each query in the NDJSON body
-- **Lookback windows**: detects `now-24h` style range filters and records the time window
+This project aims to provide **applicative load observability** for Elasticsearch deployments running on **ECK (Elastic Cloud on Kubernetes)**. Given a client’s ECK cluster, the system should:
 
-### Event Sampling
+1. **Identify the most loading queries** — which requests consume the most resources and contribute most to contention.
+2. **Enable panel creation** — surface this data in dashboards so operators and developers can analyze and act on it.
 
-In production, high-traffic clusters can generate a large volume of usage events. The gateway supports **configurable event sampling** to reduce load on the `.usage-events` index:
+The end goal is to **understand what is causing resource contention** (storage, CPU, memory, network) and **correlate it with queries and users** so the source of load can be clearly attributed.
 
-- Set `EVENT_SAMPLE_RATE` (0.0-1.0) to control what fraction of requests emit events
-- Adjustable at runtime via the UI slider or `PATCH /_gateway/config`
-- **Field heat is unaffected** by sampling — heat scores are proportions (ratios), so both numerator and denominator scale equally
-- Index heat (ops/hour) will be proportionally lower, but relative rankings between indices are preserved
+---
 
-### Index and Index Group Resolution
+## 2. Core Concepts
 
-Every usage event contains two index-related fields: `index` (raw) and `index_group` (logical).
+### 2.1 Stress Score
 
-**`index`** is extracted from the URL path by `parse_path()` in `extractor.py` — it's whatever the client targeted:
+A **stress score** is a synthetic metric that quantifies how “heavy” or costly a query is. Example inputs:
 
-| Request path | `index` |
-|---|---|
-| `/orders/_search` | `orders` (the alias) |
-| `/orders-us/_doc/1` | `orders-us` (concrete) |
-| `/logs-2026.02.06/_bulk` | `logs-2026.02.06` (concrete) |
-| `/products/_search` | `products` (alias = concrete) |
-| `/_bulk` | `None` (system endpoint) |
+- **Execution time** — e.g. time from request start to response.
+- (Future) Other factors such as resource usage, result size, or shard involvement.
 
-**`index_group`** is resolved by `resolve_group()` in `metadata.py` using a cache of ES alias and data stream mappings (refreshed every 60s from `GET /_aliases` and `GET /_data_stream/*`):
+The stress score allows:
 
-1. **Concrete index lookup**: If the name is a known concrete index, return its alias/data stream group.
-2. **Group name match**: If the name is itself a known group (alias queried directly), return it.
-3. **Fallback**: Return the name as-is (unknown index, or metadata not yet loaded).
+- Ranking queries by impact.
+- Comparing similar queries (e.g. same template, different parameters).
+- Correlating high-stress queries with resource contention.
 
-| `index` | Resolution path | `index_group` |
-|---|---|---|
-| `orders-us` | Concrete → alias `orders` | `orders` |
-| `orders-eu` | Concrete → alias `orders` | `orders` |
-| `orders` | Is a group name → itself | `orders` |
-| `logs-2026.02.06` | Concrete → alias `logs` | `logs` |
-| `products` | Concrete → alias `products` (self) | `products` |
-| `mystery` | Not found → fallback | `mystery` |
+---
 
-**Why dashboards aggregate on `index_group`, not `index`**: Read queries target aliases (`/orders/_search`), while writes target concrete indices (`/orders-us/_doc/1`). If dashboards aggregated on `index`, reads and writes would appear as separate buckets. The `index_group` gives a consistent view where all operations on the same logical index contribute to the same bucket. The raw `index` field is preserved in events for debugging in Discover.
+### 2.2 Query Analysis
 
-## Quick Start
+For each query (or query template), the system should capture:
 
-### 1. Start Elasticsearch & Kibana
+| Dimension | Description |
+|-----------|-------------|
+| **Operation type** | Whether the query is **geo**, **text** (full-text search), **aggregation**, **kNN**, etc. This helps understand which workloads dominate. |
+| **Query scrubbing / templating** | Normalize the query (e.g. remove literal values, IDs, dates) to get a **query template**. This enables: <br>• Detecting **repeated** or **high-frequency** patterns. <br>• Grouping identical logical queries for aggregation and stress scoring. |
 
-The project includes a `docker-compose.yml` that runs Elasticsearch 8.12.2 and Kibana 8.12.2 as containers (single-node, security disabled for local dev).
+Outcomes:
 
-```bash
-docker-compose up -d
-# Wait for ES to be healthy
-curl http://localhost:9200/_cluster/health
-```
+- “Top N most loading query templates.”
+- “Which operation types contribute most to CPU/memory/network.”
+- “Which templates run most often and at what stress.”
 
-- **Elasticsearch**: [http://localhost:9200](http://localhost:9200)
-- **Kibana**: [http://localhost:5601](http://localhost:5601)
+---
 
-### 2. Install Dependencies
+### 2.3 User / Requester Analysis
 
-```bash
-pip install -r requirements.txt
-```
+To attribute load to **who** and **what** is sending it:
 
-### 3. Start the Gateway
+| Dimension | Description |
+|-----------|-------------|
+| **Hostname** | Machine or pod from which the request originated. |
+| **Username** | Elasticsearch user (or API key identity) performing the query. |
+| **Applicative provider** | Name of the application or service that uses Elasticsearch (e.g. “search-api”, “recommendation-service”). |
 
-```bash
-python -m gateway.main
-# Gateway listens on port 9301, proxies to ES on port 9200
-```
+Outcomes:
 
-### 4. Seed Sample Data
+- “Which host/application/user is driving the most load.”
+- Correlation with stress score and query templates for root-cause analysis.
 
-```bash
-python -m generator.seed --gateway
-# Creates 'products' index with 100 sample documents
-```
+---
 
-### 5. Import Kibana Dashboards
+## 3. Resource Contention & Correlation
 
-```bash
-python kibana_setup.py --no-wait
-```
+Resources in scope:
 
-### 6. Generate Traffic & View Results
+- **Storage** — disk I/O, index size growth, segment merging.
+- **CPU** — search and indexing CPU time.
+- **Memory** — heap, caches, circuit breakers.
+- **Network** — bandwidth and latency between nodes and clients.
 
-You can generate traffic in two ways:
+The system should support:
 
-**Option A — Via the UI** (recommended): Open the gateway control panel at [http://localhost:9301/_gateway/ui](http://localhost:9301/_gateway/ui). Use the Generator tab to select a scenario, adjust query weights, and click **Run Scenario** or **Run All Scenarios**.
+1. **Observing contention** — when and where each resource is under pressure (e.g. high CPU, memory pressure, slow disk).
+2. **Correlating with queries** — which query templates and operation types spike when contention appears.
+3. **Correlating with users** — which hostnames, usernames, and applicative providers are active during those spikes.
 
-![Generator — scenario selection and weight sliders](docs/generator.jpg)
+**Target outcome:** Answer questions like:  
+*“The CPU spike at 14:00 was driven by aggregation queries from application X, host Y, and the top contributing template was Z.”*
 
-**Option B — Via CLI**:
-```bash
-python -m generator.generate --duration 60 --rps 10
-```
+---
 
-After generating traffic, view the results:
+## 4. Recommended Dashboards for Best Analysis
 
-- **Kibana dashboards**: Open [http://localhost:5601](http://localhost:5601) and navigate to **Dashboards** to see the pre-built usage and heat visualizations.
+To get the most value from the data above, the following dashboards are recommended.
 
-![Kibana dashboard — index groups, operations over time, top fields by category](docs/dashboard1.jpg)
+### Dashboard 1: **Top Loading Queries (by stress & template)**
 
-![Kibana dashboard — sorted/fetched fields, lookback windows, raw events](docs/dashboard2.jpg)
+- **Purpose:** See which logical queries (templates) contribute most to load.
+- **Panels:**
+  - Table: query template, operation type, total stress score, execution count, avg execution time.
+  - Bar chart: top N query templates by stress score (e.g. last 24h).
+  - Time series: stress score over time, optionally broken down by template or operation type.
+- **Use case:** Prioritize optimization (slow or high-stress templates first).
 
-- **Gateway monitor**: Switch to the **Monitor** tab in the UI to see live stats, grouped by proxy, events, performance, and system.
+---
 
-![Monitor — grouped metrics with reset button](docs/monitor.jpg)
+### Dashboard 2: **Query Template Frequency & Repetition**
 
-## Configuration
+- **Purpose:** Understand how often the same logical query runs (e.g. N+1 patterns, repeated heavy queries).
+- **Panels:**
+  - Table: template, execution count, unique callers (e.g. hostname or app), time range.
+  - Time series: execution count per template over time.
+  - Heatmap or distribution: template vs. execution count to spot “noisy” templates.
+- **Use case:** Find candidates for caching, batching, or deduplication.
 
-All settings via environment variables (see `config.py`). Full configuration reference in [ARCHITECTURE.md](ARCHITECTURE.md#configuration).
+---
 
-## API Endpoints
+### Dashboard 3: **Operation Type Breakdown**
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /_gateway/health` | Health check with ES connectivity probe |
-| `GET /_gateway/stats` | Internal counters and metadata cache info |
-| `GET /_gateway/groups` | Index groups with concrete indices |
-| `GET /_gateway/sample-events` | Recent usage events for debugging |
-| `GET/PATCH /_gateway/config` | Event sampling and query body storage config |
-| `GET /_gateway/ui` | Control panel UI |
-| `POST /_gateway/generate` | Run query generator from UI |
-| `DELETE /_gateway/events` | Clear all usage events |
-| `* /{path}` | All other traffic proxied to Elasticsearch |
+- **Purpose:** See which workload types (geo, text, aggregation, etc.) dominate.
+- **Panels:**
+  - Pie or bar: share of requests/stress by operation type.
+  - Time series: request count or stress score by operation type over time.
+  - Table: operation type, count, total stress, avg time.
+- **Use case:** Balance capacity and tuning (e.g. more CPU for aggregations vs. memory for text search).
 
-## Monitoring
+---
 
-### Health Check
+### Dashboard 4: **Load by User / Application / Host**
 
-```bash
-curl http://localhost:9301/_gateway/health
-```
+- **Purpose:** Attribute load to hostname, username, and applicative provider.
+- **Panels:**
+  - Table: hostname (or app name), username, request count, total stress score, avg time.
+  - Bar chart: top hosts or applications by stress score.
+  - Time series: stress or request rate over time, split by application or host.
+- **Use case:** “Which app or host is causing the spike?” and capacity/ownership discussions.
 
-Returns **200** when ES is reachable:
-```json
-{
-  "service": "es-usage-gateway",
-  "status": "healthy",
-  "elasticsearch": "reachable",
-  "uptime_seconds": 3600.1,
-  "events_emitted": 1250,
-  "events_failed": 3
-}
-```
+---
 
-Returns **503** when ES is unreachable:
-```json
-{
-  "service": "es-usage-gateway",
-  "status": "unhealthy",
-  "elasticsearch": "connection refused",
-  "uptime_seconds": 120.5,
-  "events_emitted": 0,
-  "events_failed": 15
-}
-```
+### Dashboard 5: **Resource Contention vs. Queries (Correlation)**
 
-Use this endpoint for load balancer health checks or uptime monitoring.
+- **Purpose:** Link resource metrics (CPU, memory, network, storage) to query and user activity.
+- **Panels:**
+  - Time series: resource metrics (e.g. CPU %, heap usage, disk IO, network bytes) on one axis.
+  - Overlay or aligned time series: stress score or request rate by template or by application.
+  - Table or list: “Top templates / apps during contention window” (e.g. select a time range of high CPU and see top queries in that window).
+- **Use case:** Root cause — “This CPU spike was caused by these query templates from this application.”
 
-### Internal Stats
+---
 
-```bash
-curl http://localhost:9301/_gateway/stats
-```
+### Dashboard 6: **Stress Score Distribution & Trends**
 
-Returns all internal counters:
-```json
-{
-  "requests_proxied": 5000,
-  "requests_failed": 2,
-  "events_emitted": 4500,
-  "events_failed": 8,
-  "events_skipped": 490,
-  "events_sampled_out": 120,
-  "events_dropped": 0,
-  "extraction_errors": 0,
-  "metadata_refresh_ok": 60,
-  "metadata_refresh_failed": 0,
-  "startup_time": "2026-02-06T10:00:00+00:00",
-  "uptime_seconds": 3600.1,
-  "metadata_cache": {
-    "groups": 5
-  }
-}
-```
+- **Purpose:** Monitor overall “heaviness” of the cluster and spot regressions.
+- **Panels:**
+  - Time series: p50, p95, p99 stress score over time.
+  - Histogram: distribution of stress scores (e.g. per hour).
+  - Single stat or gauge: current vs. previous period (e.g. avg stress score).
+- **Use case:** SLOs and trend analysis (e.g. “queries got heavier after deployment X”).
 
-Key metrics to watch:
-- **events_failed** — if this grows steadily, bulk event writes to ES are failing
-- **events_dropped** — events dropped due to queue backpressure (queue full). If this grows, ES is too slow to keep up with event volume — consider increasing `BULK_QUEUE_SIZE` or reducing `EVENT_SAMPLE_RATE`
-- **events_sampled_out** — events skipped due to sampling (expected when rate < 100%)
-- **requests_failed** — proxy 502 errors (ES unreachable for proxied requests)
-- **extraction_errors** — DSL parsing failures (should be rare/zero)
-- **metadata_refresh_failed** — if this grows, the alias/data stream cache is stale
+---
 
-All counters reset to zero on restart.
+## 5. Summary
 
-## Crash Behavior
+| Goal | How it’s achieved |
+|------|-------------------|
+| Find most loading queries | Stress score + query template aggregation; Dashboard 1. |
+| Quantify “heaviness” | Stress score (e.g. time-based, later resource-aware). |
+| Query analysis | Operation type + scrubbing/templating; Dashboards 1, 2, 3. |
+| User/requester analysis | Hostname, username, applicative provider; Dashboard 4. |
+| Resource contention & source | Correlation of resources with templates and users; Dashboard 5. |
+| Panels for analysis | Dashboards 1–6 above. |
 
-The gateway is designed with a "never block the request" principle. Observation (field extraction, event emission) is fire-and-forget. Here's what happens if the gateway crashes:
-
-| State | On crash | After restart |
-|-------|----------|---------------|
-| Proxied traffic | Interrupted | Resumes immediately |
-| In-flight events | Lost (fire-and-forget tasks) | Fresh start |
-| Usage events in ES | Preserved (already written) | Still available for heat analysis |
-| Metadata cache | Lost (in-memory) | Rebuilt automatically in <1 second |
-| Runtime config changes | Lost (in-memory) | Reverts to environment variable defaults |
-| Metrics counters | Lost (in-memory) | Reset to zero |
-
-### Key design decisions
-
-- **Events are best-effort**: A small number of lost events during a crash does not meaningfully affect heat analysis, which operates on aggregated data over hours/days.
-- **No persistent queue**: Events go directly to ES via fire-and-forget. This keeps the gateway simple and avoids introducing queue management complexity.
-- **Startup without ES**: The gateway starts even if Elasticsearch is unreachable. It will return 502 for proxied requests but the health endpoint will report `unhealthy`. Once ES becomes available, everything recovers automatically.
-- **Clean shutdown**: On graceful shutdown (SIGTERM), all HTTP clients are properly closed and connections released.
+This README describes the **intended product and analysis experience**. Implementation details and code may evolve; this document serves as the specification for what “done” looks like from an observability and dashboard perspective.
