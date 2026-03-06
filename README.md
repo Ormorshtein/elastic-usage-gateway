@@ -1,17 +1,19 @@
-# Applicative Load Observability — Elastic Usage Gateway
+# Applicative Load Observability — Usage Gateway
 
 **Product specification & vision**
+
+This spec is **database-agnostic**: it applies to **Elasticsearch** (e.g. ECK), **MongoDB**, **PostgreSQL**, and similar data platforms. Backend-specific details (e.g. query types, auth) are called out where relevant.
 
 ---
 
 ## 1. Product Overview
 
-This project aims to provide **applicative load observability** for Elasticsearch deployments running on **ECK (Elastic Cloud on Kubernetes)**. Given a client’s ECK cluster, the system should:
+This project aims to provide **applicative load observability** for **database deployments** (Elasticsearch, MongoDB, PostgreSQL, etc.). Given a client’s cluster or instance, the system should:
 
-1. **Identify the most loading queries** — which requests consume the most resources and contribute most to contention.
+1. **Identify the most loading operations and queries** — which requests consume the most resources and contribute most to contention.
 2. **Enable panel creation** — surface this data in dashboards so operators and developers can analyze and act on it.
 
-The end goal is to **understand what is causing resource contention** (storage, CPU, memory, network) and **correlate it with queries and users** so the source of load can be clearly attributed.
+The end goal is to **understand what is causing resource contention** (storage, CPU, memory, network) and **correlate it with operations, queries, and users** so the source of load can be clearly attributed.
 
 ---
 
@@ -19,32 +21,46 @@ The end goal is to **understand what is causing resource contention** (storage, 
 
 ### 2.1 Stress Score
 
-A **stress score** is a synthetic metric that quantifies how “heavy” or costly a query is. Example inputs:
+A **stress score** is a synthetic metric that quantifies how “heavy” or costly an **operation** (or query) is.
 
-- **Execution time** — e.g. time from request start to response.
-- (Future) Other factors such as resource usage, result size, or shard involvement.
+**Simple example (Elasticsearch).** Best-effort weights; use `norm(x) = x / baseline` (e.g. baseline 1000 ms, 10k hits, 100 docs).
 
-The stress score allows:
+- **Search / query:**  
+  `stress_score = 0.5 * norm(took_ms) + 0.3 * norm(hits_or_response_bytes) + 0.2 * norm(complexity)`
+- **Index / bulk:**  
+  `stress_score = 0.4 * norm(took_ms) + 0.6 * norm(bulk_size)`
 
-- Ranking queries by impact.
-- Comparing similar queries (e.g. same template, different parameters).
-- Correlating high-stress queries with resource contention.
+Operation/query type (e.g. bulk vs. single, update by query vs. single) is reflected in these inputs and in how you bucket and compare stress.
 
 ---
 
-### 2.2 Query Analysis
+The stress score allows **ranking** operations and queries by impact. **Aggregating and bucketing the sum of stress score** then lets you compare impact across different parameters — for example:
 
-For each query (or query template), the system should capture:
+- Same **template** (e.g. total load per query template).
+- Same **target** (table / index / collection) — e.g. total load per index.
+- Same **user** (e.g. total load per username or applicative provider).
+- **Operation kind** (e.g. insert vs. update vs. delete vs. query [select]).
+- **Query type** (e.g. agg vs. text vs. geo when the operation is a query).
+
+That way you can answer questions like “which template / user / operation contributes most?” and correlate high aggregate stress with resource contention.
+
+---
+
+### 2.2 Operation & Query Analysis
+
+For each **operation** (request), the system should capture:
 
 | Dimension | Description |
 |-----------|-------------|
-| **Operation type** | Whether the query is **geo**, **text** (full-text search), **aggregation**, **kNN**, etc. This helps understand which workloads dominate. |
-| **Query scrubbing / templating** | Normalize the query (e.g. remove literal values, IDs, dates) to get a **query template**. This enables: <br>• Detecting **repeated** or **high-frequency** patterns. <br>• Grouping identical logical queries for aggregation and stress scoring. |
+| **Operation kind** | Whether the request is **insert**, **update**, **delete**, or **query** (select). This separates writes from reads. |
+| **Target (table / index / collection)** | Which table (PostgreSQL), index (Elasticsearch), or collection (MongoDB) is queried or written to. Essential for attributing load to a specific data set. |
+| **Operation / query type** | For **queries** (select): e.g. **agg**, **text**, **geo**, **kNN** (Elastic); find vs. aggregation (MongoDB); simple vs. join-heavy (PostgreSQL). For **insert**: single vs. **bulk**. For **update**: single vs. **by query**. For **delete**: single vs. **by query**. Backend-specific. This is also taken into account in the stress score. |
+| **Scrubbing / templating** | Normalize the request (e.g. remove literal values, IDs, dates) to get a **request template**. This enables: <br>• Detecting **repeated** or **high-frequency** patterns. <br>• Grouping identical logical operations for aggregation and stress scoring. |
 
 Outcomes:
 
-- “Top N most loading query templates.”
-- “Which operation types contribute most to CPU/memory/network.”
+- “Top N most loading operation/query templates.”
+- “Which tables/indexes/collections and which operations/query types contribute most to CPU/memory/network.”
 - “Which templates run most often and at what stress.”
 
 ---
@@ -66,105 +82,63 @@ Outcomes:
 
 ---
 
-## 3. Resource Contention & Correlation
+## 3. Dashboard: Applicative Load Observability
 
-Resources in scope:
+All panels live in a **single dashboard**. A visual wireframe is available at [`docs/dashboard-wireframes.html`](docs/dashboard-wireframes.html).
 
-- **Storage** — disk I/O, index size growth, segment merging.
-- **CPU** — search and indexing CPU time.
-- **Memory** — heap, caches, circuit breakers.
-- **Network** — bandwidth and latency between nodes and clients.
+### Row 1 — Top Loading Operations & Queries
 
-The system should support:
+**Purpose:** See which templates contribute most to load and how stress evolves over time.
 
-1. **Observing contention** — when and where each resource is under pressure (e.g. high CPU, memory pressure, slow disk).
-2. **Correlating with queries** — which query templates and operation types spike when contention appears.
-3. **Correlating with users** — which hostnames, usernames, and applicative providers are active during those spikes.
+| Panel | Type | What it shows |
+|-------|------|---------------|
+| Top templates by stress | Bar chart | Top N operation/query templates ranked by total stress score |
+| Stress over time | Time series | Stress score over time, broken down by template, target, operation kind, or operation/query type |
 
-**Target outcome:** Answer questions like:  
-*“The CPU spike at 14:00 was driven by aggregation queries from application X, host Y, and the top contributing template was Z.”*
+### Row 2 — Template Frequency & Repetition (by dimension)
 
----
+**Purpose:** Spot repeated or noisy patterns across all key dimensions.
 
-## 4. Recommended Dashboards for Best Analysis
+| Panel | Type | What it shows |
+|-------|------|---------------|
+| Execution count per template | Time series | How often each template runs over time |
+| Execution count by operation kind | Time series | query vs. insert vs. update/delete over time |
+| Execution count by operation/query type | Time series | agg, bulk, text, geo, by query, etc. over time |
+| Execution count by target | Time series | Per index / table / collection over time |
+| Execution count by application / host | Time series | Per applicative provider or hostname over time |
 
-To get the most value from the data above, the following dashboards are recommended.
+### Row 3 — Load by User / Application / Host
 
-### Dashboard 1: **Top Loading Queries (by stress & template)**
+**Purpose:** Attribute load to who and what is sending it.
 
-- **Purpose:** See which logical queries (templates) contribute most to load.
-- **Panels:**
-  - Table: query template, operation type, total stress score, execution count, avg execution time.
-  - Bar chart: top N query templates by stress score (e.g. last 24h).
-  - Time series: stress score over time, optionally broken down by template or operation type.
-- **Use case:** Prioritize optimization (slow or high-stress templates first).
-
----
-
-### Dashboard 2: **Query Template Frequency & Repetition**
-
-- **Purpose:** Understand how often the same logical query runs (e.g. N+1 patterns, repeated heavy queries).
-- **Panels:**
-  - Table: template, execution count, unique callers (e.g. hostname or app), time range.
-  - Time series: execution count per template over time.
-  - Heatmap or distribution: template vs. execution count to spot “noisy” templates.
-- **Use case:** Find candidates for caching, batching, or deduplication.
+| Panel | Type | What it shows |
+|-------|------|---------------|
+| Top apps/hosts by stress | Bar chart | Top hostnames or applications ranked by total stress score |
+| Stress/rate over time by app | Time series | Stress or request rate split by application or host |
 
 ---
 
-### Dashboard 3: **Operation Type Breakdown**
+## 4. Summary
 
-- **Purpose:** See which workload types (geo, text, aggregation, etc.) dominate.
-- **Panels:**
-  - Pie or bar: share of requests/stress by operation type.
-  - Time series: request count or stress score by operation type over time.
-  - Table: operation type, count, total stress, avg time.
-- **Use case:** Balance capacity and tuning (e.g. more CPU for aggregations vs. memory for text search).
-
----
-
-### Dashboard 4: **Load by User / Application / Host**
-
-- **Purpose:** Attribute load to hostname, username, and applicative provider.
-- **Panels:**
-  - Table: hostname (or app name), username, request count, total stress score, avg time.
-  - Bar chart: top hosts or applications by stress score.
-  - Time series: stress or request rate over time, split by application or host.
-- **Use case:** “Which app or host is causing the spike?” and capacity/ownership discussions.
-
----
-
-### Dashboard 5: **Resource Contention vs. Queries (Correlation)**
-
-- **Purpose:** Link resource metrics (CPU, memory, network, storage) to query and user activity.
-- **Panels:**
-  - Time series: resource metrics (e.g. CPU %, heap usage, disk IO, network bytes) on one axis.
-  - Overlay or aligned time series: stress score or request rate by template or by application.
-  - Table or list: “Top templates / apps during contention window” (e.g. select a time range of high CPU and see top queries in that window).
-- **Use case:** Root cause — “This CPU spike was caused by these query templates from this application.”
-
----
-
-### Dashboard 6: **Stress Score Distribution & Trends**
-
-- **Purpose:** Monitor overall “heaviness” of the cluster and spot regressions.
-- **Panels:**
-  - Time series: p50, p95, p99 stress score over time.
-  - Histogram: distribution of stress scores (e.g. per hour).
-  - Single stat or gauge: current vs. previous period (e.g. avg stress score).
-- **Use case:** SLOs and trend analysis (e.g. “queries got heavier after deployment X”).
-
----
-
-## 5. Summary
-
-| Goal | How it’s achieved |
+| Goal | How it's achieved |
 |------|-------------------|
-| Find most loading queries | Stress score + query template aggregation; Dashboard 1. |
-| Quantify “heaviness” | Stress score (e.g. time-based, later resource-aware). |
-| Query analysis | Operation type + scrubbing/templating; Dashboards 1, 2, 3. |
-| User/requester analysis | Hostname, username, applicative provider; Dashboard 4. |
-| Resource contention & source | Correlation of resources with templates and users; Dashboard 5. |
-| Panels for analysis | Dashboards 1–6 above. |
+| Find most loading operations & queries | Stress score + template aggregation; Row 1. |
+| Quantify "heaviness" | Stress score (time, result size, complexity, bulk size). |
+| Operation & query analysis | Target + operation kind + operation/query type + scrubbing/templating; Rows 1–2. |
+| User/requester analysis | Hostname, username, applicative provider; Row 3. |
+| Resource contention & source | Use dashboard rows together: correlate Row 1/2 spikes with Row 3 breakdown and Row 3 attribution. |
+
 
 This README describes the **intended product and analysis experience**. Implementation details and code may evolve; this document serves as the specification for what “done” looks like from an observability and dashboard perspective.
+
+---
+
+## 5. User Story: Finding the Source of Resource Contention
+
+*As an operator, I notice a CPU spike on the cluster. Here is how I use the dashboard to find the root cause:*
+
+1. **Start at Row 1** — Look at the stress score time series. The spike is visible. The top templates bar shows `search:agg:products` leading by a wide margin.
+2. **Move to Row 2** — The "by operation kind" panel confirms the spike aligns with **query** traffic, not inserts or updates. The "by operation/query type" panel narrows it to **agg** type. The "by target" panel shows `products` index is the hotspot. The "by application" panel points to `search-api`.
+3. **Confirm at Row 3** — The top apps bar ranks `search-api` highest. The time series shows its stress rate spiking in the same window.
+
+**Conclusion:** *“The CPU spike was driven by agg-type queries on the `products` index, originating from `search-api`. The top contributing template was `search:agg:products`.”*
